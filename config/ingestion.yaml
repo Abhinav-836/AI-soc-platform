@@ -1,0 +1,7 @@
+﻿sources:
+  file:
+    enabled: true
+    paths:
+      - data/raw/test.jsonl
+parsers: {}
+normalization: {}

@@ -1,0 +1,255 @@
+playbook:
+  id: "PB-101"
+  name: "Block IP Address"
+  category: "network_security"
+  severity: "medium"
+  version: "2.1"
+  last_updated: "2024-01-15"
+  description: "Block malicious IP address across network infrastructure"
+  owner: "SOC Team"
+  enabled: true
+  stop_on_failure: true
+  require_approval: true
+  approval_timeout: 300  # 5 minutes
+
+triggers:
+  - condition: "malicious_ip_detected"
+    threshold: 1
+    time_window: "1m"
+    
+  - condition: "brute_force_attempts"
+    threshold: 5
+    time_window: "5m"
+    
+  - condition: "port_scan_detected"
+    threshold: 10
+    time_window: "2m"
+    
+  - condition: "malware_c2_communication"
+    threshold: 1
+    time_window: "10m"
+
+detection:
+  methods:
+    - "Firewall logs analysis"
+    - "IDS/IPS alerts"
+    - "Threat intelligence feeds"
+    - "Network traffic analysis"
+    
+  indicators:
+    - "Multiple failed authentication attempts"
+    - "Port scanning activity"
+    - "Malicious payload delivery"
+    - "Command and control communication"
+    - "Data exfiltration attempts"
+
+analysis:
+  steps:
+    - step: "Verify IP reputation"
+      commands:
+        - "abuseipdb --check {ip}"
+        - "virustotal --ip {ip}"
+        - "check_shodan {ip}"
+        
+    - step: "Check historical activity"
+      commands:
+        - "elasticsearch-search index=events query='src_ip:{ip}' timeframe='7d'"
+        - "check_firewall_logs ip={ip} timeframe='24h'"
+        
+    - step: "Assess impact"
+      checklist:
+        - "Any successful compromises?"
+        - "Data accessed or exfiltrated?"
+        - "Lateral movement detected?"
+        - "Persistence mechanisms established?"
+
+containment:
+  automated:
+    - name: "enrich_ip_info"
+      provider: "abuseipdb"
+      enabled: true
+      parameters:
+        ip: "{ip}"
+        categories: true
+        confidence: true
+        
+    - name: "check_firewall_rules"
+      provider: "iptables"
+      enabled: true
+      command: "iptables -C INPUT -s {ip} -j DROP"
+      sudo_required: true
+      
+    - name: "block_ip_firewall"
+      provider: "iptables"
+      enabled: true
+      command: "iptables -A INPUT -s {ip} -j DROP"
+      sudo_required: true
+      require_approval: false
+      parameters:
+        comment: "Blocked by SOC - {reason}"
+        
+    - name: "update_threat_intel"
+      provider: "local_db"
+      enabled: true
+      action: "add_ioc"
+      parameters:
+        type: "ip"
+        value: "{ip}"
+        source: "soc_block"
+        reason: "{reason}"
+        confidence: 0.9
+
+  manual:
+    - action: "Check network devices"
+      instructions: |
+        1. Log into perimeter firewall
+        2. Navigate to Access Rules
+        3. Add deny rule for IP {ip}
+        4. Apply rule to all relevant zones
+        5. Save configuration
+        
+    - action: "Verify cloud security groups"
+      instructions: |
+        1. Access AWS/Azure/GCP console
+        2. Navigate to Security Groups/NSGs
+        3. Add deny rule for IP {ip}
+        4. Apply to all relevant resources
+        
+    - action: "Update WAF rules"
+      instructions: |
+        1. Access WAF management console
+        2. Create IP blacklist rule
+        3. Add IP {ip} to blacklist
+        4. Deploy rule to production
+
+  escalation:
+    condition: "critical_severity OR multiple_targets OR data_breach"
+    contacts:
+      - "SOC Lead: +1-555-1234"
+      - "Network Team: network-team@example.com"
+      - "CISO: ciso@example.com"
+      
+  notification:
+    on_start:
+      - provider: "slack"
+        channel: "#soc-alerts"
+        message: "Starting IP block playbook for {ip} - Reason: {reason}"
+        
+    on_success:
+      - provider: "slack"
+        channel: "#soc-actions"
+        message: "✅ Successfully blocked IP {ip} - Action complete"
+        
+    on_failure:
+      - provider: "slack"
+        channel: "#soc-critical"
+        message: "❌ Failed to block IP {ip} - Manual intervention required"
+        
+    summary_report:
+      - provider: "email"
+        recipients: ["soc@example.com", "network-team@example.com"]
+        subject: "IP Block Report: {ip}"
+        template: "ip_block_report.j2"
+
+eradication:
+  steps:
+    - "Review and patch exploited vulnerabilities"
+    - "Remove any malware or backdoors"
+    - "Reset compromised credentials"
+    - "Review access controls"
+    
+  validation:
+    - "Verify IP is blocked in all locations"
+    - "Confirm no further communication from IP"
+    - "Monitor for IP change or proxy use"
+    - "Check for related indicators"
+
+recovery:
+  procedures:
+    - "Document blocking rationale and evidence"
+    - "Update runbooks and knowledge base"
+    - "Review detection rules for improvements"
+    
+  verification:
+    - "Test that legitimate traffic is unaffected"
+    - "Verify monitoring is in place for bypass attempts"
+    - "Confirm logging captures blocked attempts"
+
+post_incident:
+  activities:
+    - "Root cause analysis"
+    - "Update threat intelligence feeds"
+    - "Share indicators with industry partners"
+    
+  improvements:
+    - "Consider implementing geoblocking"
+    - "Evaluate need for threat hunting"
+    - "Review and update firewall policies"
+
+automation:
+  scripts:
+    - name: "block_ip_comprehensive.py"
+      description: "Comprehensive IP blocking across multiple systems"
+      location: "/scripts/response/block_ip.py"
+      
+  apis:
+    - endpoint: "/api/v1/firewall/block"
+      method: "POST"
+      parameters:
+        ip: "string"
+        reason: "string"
+        duration: "integer"
+        
+    - endpoint: "/api/v1/threat_intel/add"
+      method: "POST"
+      parameters:
+        ioc_type: "ip"
+        value: "string"
+        source: "string"
+
+variables:
+  ip: ""
+  reason: ""
+  duration: 86400  # 24 hours default
+  comment: "Blocked by AI SOC Platform"
+  
+  firewall_rules:
+    iptables:
+      - "iptables -A INPUT -s {ip} -j DROP"
+      - "iptables -A FORWARD -s {ip} -j DROP"
+      
+    windows_firewall:
+      - "New-NetFirewallRule -DisplayName 'Block {ip}' -Direction Inbound -Action Block -RemoteAddress {ip}"
+      
+    cisco_asa:
+      - "access-list outside_access_in extended deny ip host {ip} any"
+      
+    palo_alto:
+      - "set address {ip} ip-netmask {ip}/32"
+      - "set rulebase security rules 'Block {ip}'"
+
+monitoring:
+  success_metrics:
+    - "blocking_time_seconds"
+    - "blocked_attempts_count"
+    - "no_further_communication"
+    
+  failure_conditions:
+    - "ip_still_communicating"
+    - "block_rule_not_applied"
+    - "false_positive_detected"
+    
+  alerting:
+    - "If IP changes and resumes attacks"
+    - "If blocked IP appears in legitimate traffic"
+    - "If blocking causes service disruption"
+
+retention:
+  block_duration: 86400  # 24 hours
+  review_interval: 3600  # Check every hour
+  permanent_block_threshold: 3  # Block 3 times = permanent
+  
+  unblock_conditions:
+    - "False positive confirmed"
+    - "Business justification"
+    - "Time-based expiration"

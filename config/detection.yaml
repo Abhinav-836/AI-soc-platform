@@ -1,0 +1,70 @@
+rules:
+  sigma:
+    enabled: true
+    paths:
+      - "./rules/sigma/"
+    update_interval: 3600  # seconds
+
+  yara:
+    enabled: true
+    paths:
+      - "./rules/yara/"
+    update_interval: 3600
+
+  custom:
+    enabled: true
+    rules:
+      - id: "CUSTOM-001"
+        name: "Multiple Failed SSH Logins"
+        description: "Detect multiple failed SSH login attempts from same IP"
+        severity: "medium"
+        category: "brute_force"
+        condition: |
+          event_type == "ssh_failed" AND
+          count_events(time_window="5m", src_ip=src_ip) > 5
+        actions:
+          - "alert"
+          - "enrich_ip"
+
+      - id: "CUSTOM-002"
+        name: "Unusual Process Execution"
+        description: "Detect unusual process execution patterns"
+        severity: "high"
+        category: "malware"
+        condition: |
+          event_type == "process_execution" AND
+          process_name not in whitelist AND
+          parent_process not in expected_parents
+        actions:
+          - "alert"
+          - "isolate_host"
+
+thresholds:
+  brute_force:
+    failed_logins: 5
+    time_window: "5m"
+    cooldown: "1h"
+
+  port_scan:
+    unique_ports: 10
+    time_window: "2m"
+    src_ip_group_size: 1
+
+  data_exfiltration:
+    data_transfer_size: 104857600  # 100MB
+    time_window: "10m"
+
+scoring:
+  severity_weights:
+    low: 1
+    medium: 3
+    high: 5
+    critical: 10
+
+  confidence_weights:
+    low: 0.3
+    medium: 0.6
+    high: 0.9
+
+  composite_threshold: 7.5
+  auto_escalate: true

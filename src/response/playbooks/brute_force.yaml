@@ -1,0 +1,309 @@
+playbook:
+  id: "PB-102"
+  name: "Brute Force Attack Response"
+  category: "authentication_security"
+  severity: "medium"
+  version: "2.2"
+  last_updated: "2024-01-15"
+  description: "Respond to brute force authentication attacks against systems"
+  owner: "SOC Team"
+  enabled: true
+  stop_on_failure: false
+  require_approval: false  # Automated response for brute force
+  approval_timeout: 60  # 1 minute timeout if approval required
+
+triggers:
+  - condition: "ssh_failed_logins"
+    threshold: 5
+    time_window: "5m"
+    group_by: ["src_ip", "username"]
+    
+  - condition: "rdp_failed_logins"
+    threshold: 10
+    time_window: "10m"
+    group_by: ["src_ip"]
+    
+  - condition: "web_auth_failed"
+    threshold: 20
+    time_window: "15m"
+    group_by: ["src_ip", "path"]
+    
+  - condition: "database_auth_failed"
+    threshold: 15
+    time_window: "10m"
+    group_by: ["src_ip", "database"]
+
+detection:
+  methods:
+    - "Authentication log analysis"
+    - "Failed login pattern detection"
+    - "Rate-based anomaly detection"
+    - "Account lockout monitoring"
+    
+  indicators:
+    - "Multiple failed login attempts from same IP"
+    - "Sequential username guessing"
+    - "Password spraying patterns"
+    - "Geographically improbable logins"
+    - "Off-hours authentication attempts"
+
+analysis:
+  steps:
+    - step: "Identify attack pattern"
+      commands:
+        - "analyze_auth_logs service=ssh timeframe='1h'"
+        - "check_failed_logins ip={src_ip} username={username}"
+        - "identify_password_spraying timeframe='24h'"
+        
+    - step: "Check account status"
+      commands:
+        - "check_account_lockout {username}"
+        - "verify_last_successful_login {username}"
+        - "review_account_privileges {username}"
+        
+    - step: "Assess compromise risk"
+      checklist:
+        - "Any successful logins after failures?"
+        - "Account lockout triggered?"
+        - "Sensitive resources accessible?"
+        - "Lateral movement possible?"
+
+containment:
+  automated:
+    - name: "rate_limit_attacker"
+      provider: "fail2ban"
+      enabled: true
+      parameters:
+        jail: "ssh"
+        ip: "{src_ip}"
+        bantime: 3600
+        findtime: 600
+        maxretry: 5
+        
+    - name: "temporary_ip_block"
+      provider: "iptables"
+      enabled: true
+      command: "iptables -A INPUT -s {src_ip} -p tcp --dport 22 -j DROP"
+      sudo_required: true
+      duration: 1800  # 30 minutes
+      
+    - name: "account_protection"
+      provider: "active_directory"
+      enabled: true
+      action: "protect_account"
+      parameters:
+        username: "{username}"
+        lock_duration: 900  # 15 minutes
+        require_mfa: true
+        
+    - name: "alert_admins"
+      provider: "slack"
+      enabled: true
+      channel: "#server-admins"
+      message: "Brute force attack detected against {username} from {src_ip}"
+
+  manual:
+    - action: "Review authentication logs"
+      instructions: |
+        1. SSH to target server
+        2. Check /var/log/auth.log or /var/log/secure
+        3. Look for pattern: grep "Failed password" /var/log/auth.log | grep {src_ip}
+        4. Check for successful logins: grep "Accepted" /var/log/auth.log | grep {src_ip}
+        
+    - action: "Check system resources"
+      instructions: |
+        1. Check CPU/memory usage during attack
+        2. Review network connections: netstat -an | grep {src_ip}
+        3. Check process list for anomalies
+        4. Review system logs for related events
+        
+    - action: "Implement additional controls"
+      instructions: |
+        1. Enable SSH key authentication only
+        2. Change SSH port if repeatedly targeted
+        3. Implement geofencing if applicable
+        4. Review and update firewall rules
+
+  escalation:
+    condition: "successful_compromise OR privileged_account OR multiple_services"
+    contacts:
+      - "System Administrators: sysadmins@example.com"
+      - "Security Engineering: seceng@example.com"
+      - "On-call Manager: +1-555-5678"
+      
+  notification:
+    on_start:
+      - provider: "slack"
+        channel: "#soc-alerts"
+        message: "🚨 Brute force attack detected from {src_ip} against {service}"
+        
+    on_containment:
+      - provider: "slack"
+        channel: "#soc-actions"
+        message: "✅ Contained brute force attack from {src_ip}. IP blocked for 30min."
+        
+    summary_report:
+      - provider: "email"
+        recipients: ["soc@example.com", "it-security@example.com"]
+        subject: "Brute Force Attack Report: {src_ip}"
+        template: "brute_force_report.j2"
+
+eradication:
+  steps:
+    - "Reset passwords for targeted accounts"
+    - "Review and remove unauthorized access"
+    - "Check for installed backdoors or malware"
+    - "Validate system integrity"
+    
+  validation:
+    - "Verify no ongoing attack attempts"
+    - "Confirm account security measures"
+    - "Check for system modifications"
+    - "Review authentication logs post-response"
+
+recovery:
+  procedures:
+    - "Unblock IP after cooldown period if false positive"
+    - "Reset account lockouts for legitimate users"
+    - "Update authentication policies if needed"
+    - "Document attack details and response"
+    
+  verification:
+    - "Test legitimate authentication works"
+    - "Verify monitoring captures future attempts"
+    - "Confirm no service disruption"
+
+post_incident:
+  activities:
+    - "Analyze attack source and methods"
+    - "Update threat intelligence with attacker IP"
+    - "Share indicators with industry ISAC"
+    
+  improvements:
+    - "Implement multi-factor authentication"
+    - "Deploy intrusion prevention systems"
+    - "Enhance logging and monitoring"
+    - "Regular security awareness training"
+
+automation:
+  scripts:
+    - name: "brute_force_response.py"
+      description: "Automated brute force detection and response"
+      location: "/scripts/response/brute_force.py"
+      
+  apis:
+    - endpoint: "/api/v1/auth/protect"
+      method: "POST"
+      parameters:
+        username: "string"
+        action: "lock|mfa|alert"
+        
+    - endpoint: "/api/v1/firewall/rate_limit"
+      method: "POST"
+      parameters:
+        ip: "string"
+        service: "ssh|rdp|web"
+        duration: "integer"
+
+variables:
+  src_ip: ""
+  username: ""
+  service: "ssh"
+  attack_count: 0
+  time_window: "5m"
+  
+  protection_actions:
+    low_severity:
+      - "rate_limit"
+      - "temporary_block"
+      - "alert_admins"
+      
+    medium_severity:
+      - "ip_block_1h"
+      - "account_lock_15m"
+      - "enable_mfa"
+      - "notify_security"
+      
+    high_severity:
+      - "ip_block_24h"
+      - "account_lock_1h"
+      - "password_reset"
+      - "forensic_collection"
+      - "escalate_to_management"
+
+detection_tuning:
+  thresholds:
+    ssh:
+      low: 5
+      medium: 10
+      high: 20
+      critical: 50
+      
+    rdp:
+      low: 10
+      medium: 20
+      high: 40
+      critical: 100
+      
+    web:
+      low: 20
+      medium: 50
+      high: 100
+      critical: 200
+      
+  time_windows:
+    initial: "5m"
+    extended: "1h"
+    historical: "24h"
+    
+  whitelist:
+    ip_ranges:
+      - "10.0.0.0/8"
+      - "192.168.0.0/16"
+      - "vpn-gateway-ip"
+      
+    services:
+      - "legacy_system"  # Higher thresholds
+      - "test_environment"
+
+response_timing:
+  initial_response: "30s"
+  full_containment: "5m"
+  eradication_complete: "1h"
+  recovery_complete: "2h"
+  
+  sla:
+    detection: "1m"
+    containment: "5m"
+    notification: "10m"
+    resolution: "2h"
+
+monitoring:
+  success_metrics:
+    - "response_time_seconds"
+    - "attack_stopped"
+    - "no_successful_compromise"
+    - "false_positive_rate"
+    
+  failure_conditions:
+    - "attack_continues"
+    - "account_compromised"
+    - "service_disruption"
+    
+  alerting:
+    - "If attack resumes after blocking"
+    - "If multiple accounts targeted"
+    - "If attack spans multiple services"
+
+documentation:
+  evidence_collection:
+    - "Authentication logs"
+    - "Network traffic captures"
+    - "Firewall rule changes"
+    - "Response action logs"
+    
+  reporting:
+    - "Incident timeline"
+    - "Impact assessment"
+    - "Lessons learned"
+    - "Improvement actions"

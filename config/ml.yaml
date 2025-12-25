@@ -1,0 +1,67 @@
+models:
+  anomaly:
+    isolation_forest:
+      enabled: true
+      n_estimators: 100
+      contamination: 0.01
+      max_features: 1.0
+      bootstrap: false
+      random_state: 42
+
+    autoencoder:
+      enabled: false
+      encoding_dim: 32
+      epochs: 50
+      batch_size: 32
+      validation_split: 0.2
+      patience: 10
+
+  supervised:
+    random_forest:
+      enabled: true
+      n_estimators: 100
+      max_depth: 20
+      min_samples_split: 2
+      min_samples_leaf: 1
+
+    xgboost:
+      enabled: false
+      max_depth: 6
+      learning_rate: 0.1
+      n_estimators: 100
+      objective: "binary:logistic"
+
+features:
+  network:
+    - "src_ip_entropy"
+    - "dst_port_entropy"
+    - "packet_size_mean"
+    - "packet_size_std"
+    - "bytes_per_second"
+    - "packets_per_second"
+    - "unique_ports_per_ip"
+
+  host:
+    - "process_count"
+    - "unique_users"
+    - "failed_logins_per_hour"
+    - "successful_logins_per_hour"
+    - "file_access_count"
+
+training:
+  retrain_interval: 86400  # 24 hours
+  test_size: 0.2
+  validation_size: 0.1
+  cv_folds: 5
+  random_state: 42
+
+inference:
+  batch_size: 1000
+  confidence_threshold: 0.85
+  anomaly_threshold: 0.95
+
+drift_detection:
+  enabled: true
+  window_size: 10000
+  threshold: 0.05
+  check_interval: 3600

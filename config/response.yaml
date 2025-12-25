@@ -1,0 +1,124 @@
+playbooks:
+  block_ip:
+    enabled: true
+    description: "Block malicious IP address"
+    actions:
+      - name: "enrich_ip_info"
+        provider: "abuseipdb"
+        enabled: true
+
+      - name: "check_firewall_rules"
+        provider: "iptables"
+        enabled: true
+        command: "iptables -C INPUT -s {ip} -j DROP"
+
+      - name: "block_ip"
+        provider: "iptables"
+        enabled: true
+        command: "iptables -A INPUT -s {ip} -j DROP"
+        require_approval: false
+
+      - name: "notify_soc"
+        provider: "slack"
+        enabled: true
+        channel: "#soc-alerts"
+        template: "blocked_ip_alert.j2"
+
+  brute_force_response:
+    enabled: true
+    description: "Respond to brute force attacks"
+    triggers:
+      - "CUSTOM-001"
+      - "SIGMA-SSH-BruteForce"
+    actions:
+      - name: "rate_limit_ssh"
+        provider: "fail2ban"
+        enabled: true
+        jail: "ssh"
+        bantime: "3600"
+
+      - name: "notify_admin"
+        provider: "email"
+        enabled: true
+        recipients:
+          - "soc@example.com"
+        subject: "Brute Force Attack Detected"
+
+      - name: "increase_logging"
+        provider: "syslog"
+        enabled: true
+        facility: "auth"
+        level: "info"
+
+  malware_containment:
+    enabled: true
+    description: "Contain malware infection"
+    actions:
+      - name: "isolate_host"
+        provider: "edr"
+        enabled: true
+        api_endpoint: "https://edr.example.com/api/isolate"
+
+      - name: "collect_forensics"
+        provider: "velociraptor"
+        enabled: true
+        artifact: "Windows.Forensics.ProcessInfo"
+
+      - name: "scan_host"
+        provider: "clamav"
+        enabled: true
+        scan_path: "C:\\"
+
+providers:
+  firewall:
+    iptables:
+      enabled: true
+      sudo_required: true
+
+    windows_firewall:
+      enabled: false
+      ps_executable: "powershell.exe"
+
+  notification:
+    slack:
+      enabled: true
+      webhook_url: "${SLACK_WEBHOOK_URL}"
+      default_channel: "#soc-alerts"
+
+    email:
+      enabled: true
+      smtp_server: "smtp.example.com"
+      smtp_port: 587
+      username: "${SMTP_USERNAME}"
+      password: "${SMTP_PASSWORD}"
+      from_address: "soc@example.com"
+
+    teams:
+      enabled: false
+      webhook_url: "${TEAMS_WEBHOOK_URL}"
+
+  enrichment:
+    virustotal:
+      enabled: true
+      api_key: "${VIRUSTOTAL_API_KEY}"
+      base_url: "https://www.virustotal.com/api/v3"
+
+    abuseipdb:
+      enabled: true
+      api_key: "${ABUSEIPDB_API_KEY}"
+      base_url: "https://api.abuseipdb.com/api/v2"
+
+    shodan:
+      enabled: false
+      api_key: "${SHODAN_API_KEY}"
+
+approval:
+  required_for:
+    - "block_ip"
+    - "isolate_host"
+    - "quarantine_file"
+
+  approval_timeout: 300  # seconds
+  approvers:
+    - "soc-lead@example.com"
+    - "security-manager@example.com"

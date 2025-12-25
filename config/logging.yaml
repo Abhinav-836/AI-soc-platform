@@ -1,0 +1,80 @@
+version: 1
+disable_existing_loggers: false
+
+formatters:
+  standard:
+    format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    datefmt: "%Y-%m-%d %H:%M:%S"
+
+  json:
+    format: '{"timestamp": "%(asctime)s", "name": "%(name)s", "level": "%(levelname)s", "message": "%(message)s", "module": "%(module)s", "function": "%(funcName)s", "line": "%(lineno)d"}'
+    datefmt: "%Y-%m-%dT%H:%M:%SZ"
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    level: INFO
+    formatter: standard
+    stream: ext://sys.stdout
+
+  file:
+    class: logging.handlers.RotatingFileHandler
+    level: DEBUG
+    formatter: standard
+    filename: logs/app.log
+    maxBytes: 10485760  # 10MB
+    backupCount: 5
+    encoding: utf8
+
+  alerts_file:
+    class: logging.handlers.RotatingFileHandler
+    level: INFO
+    formatter: json
+    filename: logs/alerts.log
+    maxBytes: 10485760
+    backupCount: 10
+    encoding: utf8
+
+  audit_file:
+    class: logging.handlers.RotatingFileHandler
+    level: INFO
+    formatter: json
+    filename: logs/audit.log
+    maxBytes: 10485760
+    backupCount: 10
+    encoding: utf8
+
+loggers:
+  ingestion:
+    level: INFO
+    handlers: [console, file]
+    propagate: false
+
+  detection:
+    level: INFO
+    handlers: [console, file]
+    propagate: false
+
+  ml:
+    level: INFO
+    handlers: [console, file]
+    propagate: false
+
+  response:
+    level: INFO
+    handlers: [console, file]
+    propagate: false
+
+  alerts:
+    level: INFO
+    handlers: [alerts_file]
+    propagate: false
+
+  audit:
+    level: INFO
+    handlers: [audit_file]
+    propagate: false
+
+root:
+  level: INFO
+  handlers: [console, file]

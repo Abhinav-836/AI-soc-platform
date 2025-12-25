@@ -1,0 +1,6 @@
+﻿name: Test SOC
+version: 0.1.0
+environment: development
+debug: true
+workers: 4
+timezone: UTC
