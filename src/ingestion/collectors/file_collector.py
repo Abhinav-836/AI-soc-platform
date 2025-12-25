@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime
 
-from src.utils.logger import LoggerMixin
+from src.core.logger import LoggerMixin
 
 
 class FileCollector(LoggerMixin):

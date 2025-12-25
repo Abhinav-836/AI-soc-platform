@@ -6,7 +6,7 @@ from typing import Dict, List, Any, Set
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-from src.utils.logger import LoggerMixin
+from src.core.logger import LoggerMixin
 
 
 class CorrelationEngine(LoggerMixin):

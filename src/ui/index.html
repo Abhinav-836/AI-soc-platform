@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI SOC Platform - Security Operations Center</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+</head>
+<body>
+    <div class="matrix-bg"></div>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">🛡️</div>
+                <div class="logo-text">
+                    <span class="glitch" data-text="AI SOC PLATFORM">AI SOC PLATFORM</span>
+                    <small>Security Operations Center v1.0</small>
+                </div>
+            </div>
+            <div class="status-bar">
+                <div class="status-item">
+                    <span class="status-label">System:</span>
+                    <span class="status-value online" id="systemStatus">ONLINE</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">WebSocket:</span>
+                    <span class="status-value" id="wsStatus">CONNECTING</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Alerts Today:</span>
+                    <span class="status-value" id="alertCount">0</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Uptime:</span>
+                    <span class="status-value" id="uptime">00:00:00</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Navigation -->
+        <nav class="nav">
+            <button class="nav-btn active" data-page="dashboard">📊 DASHBOARD</button>
+            <button class="nav-btn" data-page="alerts">🚨 ALERTS</button>
+            <button class="nav-btn" data-page="events">📡 EVENTS</button>
+            <button class="nav-btn" data-page="intel">🔍 THREAT INTEL</button>
+            <button class="nav-btn" data-page="response">⚡ RESPONSE</button>
+            <button class="nav-btn" data-page="settings">⚙️ SETTINGS</button>
+        </nav>
+
+        <!-- Dashboard Page -->
+        <div id="dashboardPage" class="page active">
+            <!-- Stats Cards -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-icon">📊</div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="statEventsPerSec">0</div>
+                        <div class="stat-label">Events/sec</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">🚨</div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="statTotalAlerts">0</div>
+                        <div class="stat-label">Total Alerts</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">⚠️</div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="statCriticalAlerts">0</div>
+                        <div class="stat-label">Critical</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">🔄</div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="statActiveRules">0</div>
+                        <div class="stat-label">Active Rules</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">🔌</div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="statConnections">0</div>
+                        <div class="stat-label">WS Connections</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">🤖</div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="statMLInferences">0</div>
+                        <div class="stat-label">ML Inferences</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Charts Row -->
+            <div class="charts-row">
+                <div class="chart-card">
+                    <div class="chart-title">Alert Timeline</div>
+                    <canvas id="alertTimelineChart"></canvas>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-title">Alert Severity Distribution</div>
+                    <canvas id="severityChart"></canvas>
+                </div>
+            </div>
+
+            <div class="charts-row">
+                <div class="chart-card">
+                    <div class="chart-title">Top Attack Sources</div>
+                    <canvas id="topSourcesChart"></canvas>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-title">Event Types</div>
+                    <canvas id="eventTypesChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Recent Alerts -->
+            <div class="recent-alerts">
+                <div class="section-header">
+                    <h3>🔔 RECENT ALERTS</h3>
+                    <button class="view-all-btn" onclick="loadAlertsPage()">View All →</button>
+                </div>
+                <div class="alerts-table-container">
+                    <table class="alerts-table">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Severity</th>
+                                <th>Rule</th>
+                                <th>Source</th>
+                                <th>Status</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="recentAlertsTable">
+                            <tr><td colspan="6" class="loading">Loading alerts...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Alerts Page -->
+        <div id="alertsPage" class="page">
+            <div class="page-header">
+                <h2>🚨 Security Alerts</h2>
+                <div class="filter-bar">
+                    <select id="alertSeverityFilter">
+                        <option value="">All Severities</option>
+                        <option value="critical">Critical</option>
+                        <option value="high">High</option>
+                        <option value="medium">Medium</option>
+                        <option value="low">Low</option>
+                    </select>
+                    <select id="alertStatusFilter">
+                        <option value="">All Status</option>
+                        <option value="new">New</option>
+                        <option value="investigating">Investigating</option>
+                        <option value="contained">Contained</option>
+                        <option value="resolved">Resolved</option>
+                    </select>
+                    <button id="refreshAlertsBtn" class="btn-secondary">⟳ Refresh</button>
+                </div>
+            </div>
+            <div class="alerts-table-container">
+                <table class="alerts-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Alert ID</th>
+                            <th>Severity</th>
+                            <th>Rule Name</th>
+                            <th>Score</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="alertsTableBody">
+                        <tr><td colspan="7" class="loading">Loading alerts...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Events Page -->
+        <div id="eventsPage" class="page">
+            <div class="page-header">
+                <h2>📡 Live Events Stream</h2>
+                <div class="controls">
+                    <button id="toggleEventsBtn" class="btn-primary">⏸️ Pause Stream</button>
+                    <button id="clearEventsBtn" class="btn-secondary">🗑️ Clear</button>
+                </div>
+            </div>
+            <div class="events-stream" id="eventsStream">
+                <div class="stream-placeholder">Waiting for events...</div>
+            </div>
+        </div>
+
+        <!-- Threat Intel Page -->
+        <div id="intelPage" class="page">
+            <div class="page-header">
+                <h2>🔍 Threat Intelligence</h2>
+                <div class="search-bar">
+                    <input type="text" id="iocSearchInput" placeholder="Search IOCs (IP, domain, hash)...">
+                    <button id="searchIocsBtn">🔍 Search</button>
+                </div>
+            </div>
+            <div class="stats-row">
+                <div class="mini-stat">
+                    <span class="mini-stat-value" id="totalIOCs">0</span>
+                    <span class="mini-stat-label">Total IOCs</span>
+                </div>
+                <div class="mini-stat">
+                    <span class="mini-stat-value" id="ipIOCs">0</span>
+                    <span class="mini-stat-label">IP Addresses</span>
+                </div>
+                <div class="mini-stat">
+                    <span class="mini-stat-value" id="domainIOCs">0</span>
+                    <span class="mini-stat-label">Domains</span>
+                </div>
+                <div class="mini-stat">
+                    <span class="mini-stat-value" id="hashIOCs">0</span>
+                    <span class="mini-stat-label">File Hashes</span>
+                </div>
+            </div>
+            <div class="iocs-table-container">
+                <table class="iocs-table">
+                    <thead>
+                        <tr>
+                            <th>Type</th>
+                            <th>Value</th>
+                            <th>Source</th>
+                            <th>Confidence</th>
+                            <th>First Seen</th>
+                        </tr>
+                    </thead>
+                    <tbody id="iocsTableBody">
+                        <tr><td colspan="5" class="loading">Loading IOCs...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Response Page -->
+        <div id="responsePage" class="page">
+            <div class="page-header">
+                <h2>⚡ Automated Response</h2>
+            </div>
+            <div class="playbooks-grid">
+                <div class="playbook-card">
+                    <div class="playbook-icon">🚫</div>
+                    <div class="playbook-info">
+                        <h4>Block IP Address</h4>
+                        <p>Block malicious IP across network infrastructure</p>
+                        <div class="playbook-actions">
+                            <button class="btn-execute" onclick="executePlaybook('block_ip')">Execute</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="playbook-card">
+                    <div class="playbook-icon">🔒</div>
+                    <div class="playbook-info">
+                        <h4>Brute Force Response</h4>
+                        <p>Respond to authentication brute force attacks</p>
+                        <div class="playbook-actions">
+                            <button class="btn-execute" onclick="executePlaybook('brute_force_response')">Execute</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="playbook-card">
+                    <div class="playbook-icon">🦠</div>
+                    <div class="playbook-info">
+                        <h4>Malware Containment</h4>
+                        <p>Isolate and contain malware infections</p>
+                        <div class="playbook-actions">
+                            <button class="btn-execute" onclick="executePlaybook('malware_containment')">Execute</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="response-log">
+                <h3>Response History</h3>
+                <div class="log-container" id="responseLog">
+                    <div class="log-entry info">Ready to execute response playbooks...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Settings Page -->
+        <div id="settingsPage" class="page">
+            <div class="page-header">
+                <h2>⚙️ System Settings</h2>
+            </div>
+            <div class="settings-grid">
+                <div class="settings-card">
+                    <h3>Connection</h3>
+                    <div class="setting-item">
+                        <label>API Endpoint:</label>
+                        <input type="text" id="apiEndpoint" value="http://localhost:8080">
+                    </div>
+                    <div class="setting-item">
+                        <label>WebSocket URL:</label>
+                        <input type="text" id="wsEndpoint" value="ws://localhost:8080/ws">
+                    </div>
+                    <button id="reconnectBtn" class="btn-primary">Reconnect</button>
+                </div>
+                <div class="settings-card">
+                    <h3>Display</h3>
+                    <div class="setting-item">
+                        <label>Theme:</label>
+                        <select id="themeSelect">
+                            <option value="dark">Dark Matrix</option>
+                            <option value="light">Light</option>
+                        </select>
+                    </div>
+                    <div class="setting-item">
+                        <label>Refresh Interval:</label>
+                        <select id="refreshInterval">
+                            <option value="1">1 second</option>
+                            <option value="5">5 seconds</option>
+                            <option value="10">10 seconds</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="settings-card">
+                    <h3>System Info</h3>
+                    <div class="info-item">
+                        <span class="info-label">Version:</span>
+                        <span class="info-value">1.0.0</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Build:</span>
+                        <span class="info-value">2024-01-15</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/websocket.js"></script>
+    <script src="js/charts.js"></script>
+    <script src="js/dashboard.js"></script>
+    <script src="js/alerts.js"></script>
+    <script src="js/events.js"></script>
+    <script src="js/intel.js"></script>
+    <script src="js/response.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List
 from ipaddress import ip_address
 
-from src.utils.logger import LoggerMixin
+from src.core.logger import LoggerMixin
 
 
 class LogNormalizer(LoggerMixin):

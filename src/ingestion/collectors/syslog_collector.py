@@ -6,7 +6,7 @@ import asyncio
 import socket
 from typing import Dict, Any, Optional
 
-from src.utils.logger import LoggerMixin
+from src.core.logger import LoggerMixin
 
 
 class SyslogCollector(LoggerMixin):

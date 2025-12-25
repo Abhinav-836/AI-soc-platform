@@ -5,7 +5,7 @@ Alert scoring and prioritization.
 from typing import Dict, Any, List
 from datetime import datetime
 
-from src.utils.logger import LoggerMixin
+from src.core.logger import LoggerMixin
 
 
 class AlertScorer(LoggerMixin):

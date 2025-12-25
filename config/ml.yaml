@@ -9,12 +9,7 @@ models:
       random_state: 42
 
     autoencoder:
-      enabled: false
-      encoding_dim: 32
-      epochs: 50
-      batch_size: 32
-      validation_split: 0.2
-      patience: 10
+      enabled: false  # Keep false to avoid TensorFlow issues
 
   supervised:
     random_forest:
@@ -49,7 +44,7 @@ features:
     - "file_access_count"
 
 training:
-  retrain_interval: 86400  # 24 hours
+  retrain_interval: 86400
   test_size: 0.2
   validation_size: 0.1
   cv_folds: 5

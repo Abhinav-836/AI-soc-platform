@@ -7,7 +7,7 @@ import json
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
 
-from src.utils.logger import LoggerMixin
+from src.core.logger import LoggerMixin
 from src.detection.rules.custom_rules import RuleEngine
 from src.detection.correlator import CorrelationEngine
 from src.detection.scoring import AlertScorer
@@ -16,9 +16,10 @@ from src.detection.scoring import AlertScorer
 class DetectionEngine(LoggerMixin):
     """Main detection engine orchestrator."""
 
-    def __init__(self, config):
+    def __init__(self, config, ws_manager=None):
         super().__init__()
         self.config = config
+        self.ws_manager = ws_manager  # Store WebSocket manager for real-time updates
         self.running = False
 
         # Engines
@@ -82,8 +83,6 @@ class DetectionEngine(LoggerMixin):
 
     async def _process_batch(self):
         """Process a batch of events."""
-        # TODO: Get events from queue/storage
-        # For now, process events from buffer
         if not self.event_buffer:
             return
 
@@ -115,6 +114,14 @@ class DetectionEngine(LoggerMixin):
                 self.stats["alerts_generated"] += len(alerts)
                 self.stats["rules_triggered"] += len(all_matches)
                 self.stats["last_alert"] = datetime.utcnow().isoformat()
+
+                # Broadcast alerts via WebSocket
+                if self.ws_manager:
+                    for alert in alerts:
+                        await self.ws_manager.broadcast({
+                            "type": "new_alert",
+                            "alert": alert,
+                        }, channel="alerts", event_type="alert")
 
                 # Log alerts
                 for alert in alerts:
@@ -154,7 +161,9 @@ class DetectionEngine(LoggerMixin):
                 "confidence": match.get("confidence", 0.5),
                 "category": match.get("category", "unknown"),
                 "indicators": match.get("indicators", []),
-                "raw_match": match,
+                "source_ip": event.get("src_ip") or event.get("source_ip"),
+                "dest_ip": event.get("dst_ip") or event.get("dest_ip"),
+                "status": "new",
             }
 
             # Calculate composite score
@@ -175,6 +184,14 @@ class DetectionEngine(LoggerMixin):
             if correlation_alerts:
                 self.alerts.extend(correlation_alerts)
                 self.stats["alerts_generated"] += len(correlation_alerts)
+
+                # Broadcast correlation alerts via WebSocket
+                if self.ws_manager:
+                    for alert in correlation_alerts:
+                        await self.ws_manager.broadcast({
+                            "type": "new_alert",
+                            "alert": alert,
+                        }, channel="alerts", event_type="alert")
 
                 for alert in correlation_alerts:
                     self.logger.info(
@@ -198,8 +215,8 @@ class DetectionEngine(LoggerMixin):
     def _generate_alert_id(self) -> str:
         """Generate unique alert ID."""
         timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
-        random_suffix = id(self) % 10000
-        return f"ALERT-{timestamp}-{random_suffix:04d}"
+        import random
+        return f"ALERT-{timestamp}-{random.randint(1000, 9999)}"
 
     async def add_event(self, event: Dict[str, Any]):
         """Add event for processing (called by ingestion)."""

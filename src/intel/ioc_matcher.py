@@ -7,7 +7,7 @@ import ipaddress
 from typing import Dict, List, Any, Optional, Set, Tuple
 from datetime import datetime
 
-from src.utils.logger import LoggerMixin
+from src.core.logger import LoggerMixin
 
 
 class IOCMatcher(LoggerMixin):

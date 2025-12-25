@@ -1,22 +1,21 @@
 """
 Configuration loader with validation.
-Supports both flat and nested YAML formats.
 """
 
 from pathlib import Path
 from typing import Any, Dict, Optional
+import os
+from dotenv import load_dotenv
 
 import yaml
 from pydantic import BaseModel, ValidationError
 
+# Load environment variables
+load_dotenv()
 
-# =========================
-# Pydantic Models
-# =========================
 
 class AppConfig(BaseModel):
     """Application configuration model."""
-
     name: str
     version: str
     environment: str = "development"
@@ -27,7 +26,6 @@ class AppConfig(BaseModel):
 
 class IngestionConfig(BaseModel):
     """Ingestion configuration model."""
-
     sources: Dict[str, Any]
     parsers: Dict[str, Any] = {}
     normalization: Dict[str, Any] = {}
@@ -35,7 +33,6 @@ class IngestionConfig(BaseModel):
 
 class DetectionConfig(BaseModel):
     """Detection configuration model."""
-
     rules: Dict[str, Any]
     thresholds: Dict[str, Any] = {}
     scoring: Dict[str, Any] = {}
@@ -43,7 +40,6 @@ class DetectionConfig(BaseModel):
 
 class MLConfig(BaseModel):
     """ML configuration model."""
-
     models: Dict[str, Any]
     features: Dict[str, Any]
     training: Dict[str, Any]
@@ -53,15 +49,10 @@ class MLConfig(BaseModel):
 
 class ResponseConfig(BaseModel):
     """Response configuration model."""
-
     playbooks: Dict[str, Any]
     providers: Dict[str, Any]
     approval: Dict[str, Any]
 
-
-# =========================
-# Config Loader
-# =========================
 
 class ConfigLoader:
     """Configuration loader with validation."""
@@ -70,16 +61,27 @@ class ConfigLoader:
         self.config_dir = Path(config_dir).resolve()
         self.configs: Dict[str, Any] = {}
         self._validate_config_dir()
+        
+        # Load environment variables
+        self.env = {
+            "VIRUSTOTAL_API_KEY": os.getenv("VIRUSTOTAL_API_KEY", ""),
+            "SHODAN_API_KEY": os.getenv("SHODAN_API_KEY", ""),
+            "ABUSEIPDB_API_KEY": os.getenv("ABUSEIPDB_API_KEY", ""),
+            "SLACK_WEBHOOK_URL": os.getenv("SLACK_WEBHOOK_URL", ""),
+            "ELASTIC_HOST": os.getenv("ELASTIC_HOST", "localhost"),
+            "ELASTIC_PORT": int(os.getenv("ELASTIC_PORT", "9200")),
+            "ELASTIC_USER": os.getenv("ELASTIC_USER", ""),
+            "ELASTIC_PASSWORD": os.getenv("ELASTIC_PASSWORD", ""),
+            "KAFKA_BOOTSTRAP_SERVERS": os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"),
+            "REDIS_HOST": os.getenv("REDIS_HOST", "localhost"),
+            "REDIS_PORT": int(os.getenv("REDIS_PORT", "6379")),
+        }
 
     def _validate_config_dir(self):
         if not self.config_dir.exists():
             raise FileNotFoundError(f"Config directory not found: {self.config_dir}")
         if not self.config_dir.is_dir():
             raise NotADirectoryError(f"Config path is not a directory: {self.config_dir}")
-
-    # -------------------------
-    # Public API
-    # -------------------------
 
     async def load_all(self):
         """Load all configuration files."""
@@ -96,16 +98,7 @@ class ConfigLoader:
             self.load_config(name, filename)
 
     def load_config(self, name: str, filename: str) -> Dict[str, Any]:
-        """
-        Load and validate a configuration file.
-
-        Args:
-            name: Configuration name
-            filename: YAML filename
-
-        Returns:
-            Loaded configuration as dict
-        """
+        """Load and validate a configuration file."""
         config_path = self.config_dir / filename
 
         if not config_path.exists():
@@ -118,51 +111,34 @@ class ConfigLoader:
             if not isinstance(raw_config, dict):
                 raise ValueError(f"{filename} is empty or invalid")
 
-            # -------------------------
-            # App config (supports flat + nested)
-            # -------------------------
             if name == "app":
                 app_cfg = raw_config.get("app", raw_config)
-
                 if not isinstance(app_cfg, dict) or not app_cfg:
                     raise ValueError("app.yaml is empty or invalid")
-
                 config = AppConfig(**app_cfg)
                 self.configs[name] = config.model_dump()
 
-            # -------------------------
-            # Ingestion
-            # -------------------------
             elif name == "ingestion":
                 config = IngestionConfig(**raw_config)
                 self.configs[name] = config.model_dump()
 
-            # -------------------------
-            # Detection
-            # -------------------------
             elif name == "detection":
                 config = DetectionConfig(**raw_config)
                 self.configs[name] = config.model_dump()
 
-            # -------------------------
-            # ML
-            # -------------------------
             elif name == "ml":
                 config = MLConfig(**raw_config)
                 self.configs[name] = config.model_dump()
 
-            # -------------------------
-            # Response
-            # -------------------------
             elif name == "response":
                 config = ResponseConfig(**raw_config)
                 self.configs[name] = config.model_dump()
 
-            # -------------------------
-            # Other / raw configs
-            # -------------------------
             else:
                 self.configs[name] = raw_config
+
+            # Inject environment variables
+            self.configs["env"] = self.env
 
             return self.configs[name]
 
@@ -170,10 +146,6 @@ class ConfigLoader:
             raise ValueError(f"Invalid configuration in {filename}:\n{e}") from e
         except yaml.YAMLError as e:
             raise ValueError(f"YAML parsing error in {filename}:\n{e}") from e
-
-    # -------------------------
-    # Helpers
-    # -------------------------
 
     def get(self, name: str, default: Any = None) -> Any:
         """Get configuration by name."""
@@ -195,13 +167,3 @@ class ConfigLoader:
             self.configs[name].update(updates)
         else:
             self.configs[name] = updates
-
-    def save(self, name: str, filename: Optional[str] = None):
-        """Save configuration back to file."""
-        if filename is None:
-            filename = f"{name}.yaml"
-
-        config_path = self.config_dir / filename
-
-        with open(config_path, "w", encoding="utf-8") as f:
-            yaml.dump(self.configs[name], f, default_flow_style=False)

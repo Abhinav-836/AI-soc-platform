@@ -8,7 +8,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
-from src.utils.logger import LoggerMixin
+from src.core.logger import LoggerMixin
 
 
 class IsolationForestAnomalyDetector(LoggerMixin):

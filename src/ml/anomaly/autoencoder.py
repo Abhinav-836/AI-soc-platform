@@ -1,25 +1,44 @@
 """
-Autoencoder for anomaly detection.
+Autoencoder for anomaly detection (Optional - requires TensorFlow).
 """
 
 import numpy as np
-import tensorflow as tf
 from typing import Dict, List, Any, Tuple, Optional
 from pathlib import Path
 
-from src.utils.logger import LoggerMixin
+from src.core.logger import LoggerMixin
+
+# Lazy load TensorFlow - only when needed
+_TENSORFLOW_AVAILABLE = None
+
+
+def _is_tensorflow_available():
+    """Check if TensorFlow is available (lazy check)."""
+    global _TENSORFLOW_AVAILABLE
+    if _TENSORFLOW_AVAILABLE is None:
+        try:
+            import tensorflow as tf
+            _TENSORFLOW_AVAILABLE = True
+        except ImportError:
+            _TENSORFLOW_AVAILABLE = False
+        except Exception as e:
+            print(f"TensorFlow import error: {e}")
+            _TENSORFLOW_AVAILABLE = False
+    return _TENSORFLOW_AVAILABLE
 
 
 class AutoencoderAnomalyDetector(LoggerMixin):
-    """Autoencoder-based anomaly detector."""
+    """Autoencoder-based anomaly detector (optional - requires TensorFlow)."""
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__()
         self.config = config
-        self.model: Optional[tf.keras.Model] = None
+        self.model: Optional[Any] = None
         self.scaler: Optional[Any] = None
         self.feature_names: List[str] = []
         self.is_trained = False
+        self.train_error_mean = 0.0
+        self.train_error_std = 1.0
 
         # Model parameters
         model_config = config.get("models", {}).get("anomaly", {}).get("autoencoder", {})
@@ -36,8 +55,26 @@ class AutoencoderAnomalyDetector(LoggerMixin):
         # Training history
         self.training_history: Dict[str, List[float]] = {}
 
+        # Warn if TensorFlow not available
+        if not _is_tensorflow_available():
+            self.logger.warning(
+                "TensorFlow not available. AutoencoderAnomalyDetector will be disabled. "
+                "Install with: pip install tensorflow-cpu"
+            )
+
+    def _get_tf(self):
+        """Get TensorFlow module (lazy import)."""
+        import tensorflow as tf
+        return tf
+
     def build_model(self, input_dim: int):
         """Build autoencoder model."""
+        if not _is_tensorflow_available():
+            self.logger.error("Cannot build model: TensorFlow not available")
+            return
+
+        tf = self._get_tf()
+        
         # Encoder
         encoder_input = tf.keras.Input(shape=(input_dim,))
         encoded = tf.keras.layers.Dense(self.encoding_dim * 2, activation='relu')(encoder_input)
@@ -53,20 +90,20 @@ class AutoencoderAnomalyDetector(LoggerMixin):
         # Compile model
         self.model.compile(
             optimizer='adam',
-            loss='mse',  # Mean Squared Error
-            metrics=['mae']  # Mean Absolute Error
+            loss='mse',
+            metrics=['mae']
         )
 
         self.logger.info(f"Built autoencoder model with input_dim={input_dim}, encoding_dim={self.encoding_dim}")
 
     def train(self, X: np.ndarray, feature_names: List[str]):
-        """
-        Train the autoencoder model.
+        """Train the autoencoder model."""
+        if not _is_tensorflow_available():
+            self.logger.error("Cannot train: TensorFlow not available")
+            return
 
-        Args:
-            X: Training data (n_samples, n_features)
-            feature_names: Names of features
-        """
+        tf = self._get_tf()
+        
         self.logger.info(f"Training autoencoder with {len(X)} samples")
 
         # Store feature names
@@ -80,6 +117,10 @@ class AutoencoderAnomalyDetector(LoggerMixin):
         # Build model if not already built
         if self.model is None:
             self.build_model(X.shape[1])
+
+        if self.model is None:
+            self.logger.error("Failed to build model")
+            return
 
         # Callbacks
         callbacks = [
@@ -97,53 +138,49 @@ class AutoencoderAnomalyDetector(LoggerMixin):
         ]
 
         # Train model
-        history = self.model.fit(
-            X_scaled, X_scaled,
-            epochs=self.epochs,
-            batch_size=self.batch_size,
-            validation_split=self.validation_split,
-            callbacks=callbacks,
-            verbose=1
-        )
+        try:
+            history = self.model.fit(
+                X_scaled, X_scaled,
+                epochs=self.epochs,
+                batch_size=self.batch_size,
+                validation_split=self.validation_split,
+                callbacks=callbacks,
+                verbose=1
+            )
 
-        # Store training history
-        self.training_history = {
-            'loss': history.history['loss'],
-            'val_loss': history.history['val_loss'],
-            'mae': history.history['mae'],
-            'val_mae': history.history['val_mae'],
-        }
+            # Store training history
+            self.training_history = {
+                'loss': history.history['loss'],
+                'val_loss': history.history['val_loss'],
+                'mae': history.history['mae'],
+                'val_mae': history.history['val_mae'],
+            }
 
-        # Calculate reconstruction errors on training data
-        train_predictions = self.model.predict(X_scaled, verbose=0)
-        train_errors = np.mean(np.square(X_scaled - train_predictions), axis=1)
-        
-        self.train_error_mean = np.mean(train_errors)
-        self.train_error_std = np.std(train_errors)
+            # Calculate reconstruction errors on training data
+            train_predictions = self.model.predict(X_scaled, verbose=0)
+            train_errors = np.mean(np.square(X_scaled - train_predictions), axis=1)
+            
+            self.train_error_mean = np.mean(train_errors)
+            self.train_error_std = np.std(train_errors)
+            self.is_trained = True
 
-        self.is_trained = True
-
-        self.logger.info(
-            f"Training complete. Final loss: {history.history['loss'][-1]:.4f}, "
-            f"val_loss: {history.history['val_loss'][-1]:.4f}"
-        )
-        self.logger.info(
-            f"Reconstruction error - mean: {self.train_error_mean:.4f}, "
-            f"std: {self.train_error_std:.4f}"
-        )
+            self.logger.info(
+                f"Training complete. Final loss: {history.history['loss'][-1]:.4f}, "
+                f"val_loss: {history.history['val_loss'][-1]:.4f}"
+            )
+            self.logger.info(
+                f"Reconstruction error - mean: {self.train_error_mean:.4f}, "
+                f"std: {self.train_error_std:.4f}"
+            )
+        except Exception as e:
+            self.logger.error(f"Error during training: {e}", exc_info=True)
+            self.is_trained = False
 
     def predict(self, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Predict anomalies.
+        """Predict anomalies."""
+        if not _is_tensorflow_available():
+            raise RuntimeError("TensorFlow not available")
 
-        Args:
-            X: Input data (n_samples, n_features)
-
-        Returns:
-            Tuple of (predictions, anomaly_scores)
-                predictions: 0 for normal, 1 for anomaly
-                anomaly_scores: Higher means more anomalous
-        """
         if not self.is_trained or self.model is None or self.scaler is None:
             raise RuntimeError("Model not trained")
 
@@ -166,8 +203,11 @@ class AutoencoderAnomalyDetector(LoggerMixin):
 
     def _calculate_anomaly_score(self, reconstruction_errors: np.ndarray) -> np.ndarray:
         """Convert reconstruction errors to anomaly scores (0-1)."""
+        # Avoid division by zero
+        std = max(self.train_error_std, 1e-6)
+        
         # Calculate probability using Gaussian assumption
-        scores = 1 - np.exp(-(reconstruction_errors - self.train_error_mean)**2 / (2 * self.train_error_std**2))
+        scores = 1 - np.exp(-(reconstruction_errors - self.train_error_mean)**2 / (2 * std**2))
         
         # Clip to [0, 1]
         scores = np.clip(scores, 0, 1)
@@ -175,15 +215,15 @@ class AutoencoderAnomalyDetector(LoggerMixin):
         return scores
 
     def detect(self, features: Dict[str, float]) -> Dict[str, Any]:
-        """
-        Detect anomaly for single sample.
+        """Detect anomaly for single sample."""
+        if not _is_tensorflow_available():
+            return {
+                "anomaly": False,
+                "score": 0.0,
+                "confidence": 0.0,
+                "error": "TensorFlow not available - autoencoder disabled",
+            }
 
-        Args:
-            features: Dictionary of feature names to values
-
-        Returns:
-            Detection results
-        """
         if not self.is_trained:
             return {
                 "anomaly": False,
@@ -224,7 +264,6 @@ class AutoencoderAnomalyDetector(LoggerMixin):
 
     def _calculate_confidence(self, score: float) -> float:
         """Calculate confidence based on anomaly score."""
-        # Higher scores get higher confidence
         if score >= 0.95:
             return 0.9
         elif score >= 0.8:
@@ -236,8 +275,13 @@ class AutoencoderAnomalyDetector(LoggerMixin):
 
     def save(self, path: str):
         """Save model to disk."""
+        if not _is_tensorflow_available():
+            self.logger.error("Cannot save: TensorFlow not available")
+            return
+
         if not self.is_trained or self.model is None:
-            raise RuntimeError("Cannot save untrained model")
+            self.logger.error("Cannot save untrained model")
+            return
 
         import joblib
         
@@ -262,34 +306,44 @@ class AutoencoderAnomalyDetector(LoggerMixin):
 
     def load(self, path: str):
         """Load model from disk."""
+        if not _is_tensorflow_available():
+            self.logger.error("Cannot load: TensorFlow not available")
+            return
+
         import joblib
         
-        # Load TensorFlow model
-        model_path = Path(path)
-        self.model = tf.keras.models.load_model(str(model_path.with_suffix('')))
+        try:
+            # Load TensorFlow model
+            model_path = Path(path)
+            tf = self._get_tf()
+            self.model = tf.keras.models.load_model(str(model_path.with_suffix('')))
 
-        # Load metadata
-        metadata_path = str(model_path.with_suffix('.metadata.pkl'))
-        metadata = joblib.load(metadata_path)
+            # Load metadata
+            metadata_path = str(model_path.with_suffix('.metadata.pkl'))
+            metadata = joblib.load(metadata_path)
 
-        self.scaler = metadata["scaler"]
-        self.feature_names = metadata["feature_names"]
-        self.train_error_mean = metadata.get("train_error_mean", 0)
-        self.train_error_std = metadata.get("train_error_std", 1)
-        self.training_history = metadata.get("training_history", {})
-        self.is_trained = True
+            self.scaler = metadata["scaler"]
+            self.feature_names = metadata["feature_names"]
+            self.train_error_mean = metadata.get("train_error_mean", 0)
+            self.train_error_std = metadata.get("train_error_std", 1)
+            self.training_history = metadata.get("training_history", {})
+            self.is_trained = True
 
-        self.logger.info(f"Model loaded from {path}")
-        self.logger.info(f"Features: {len(self.feature_names)}")
+            self.logger.info(f"Model loaded from {path}")
+            self.logger.info(f"Features: {len(self.feature_names)}")
+        except Exception as e:
+            self.logger.error(f"Error loading model: {e}", exc_info=True)
+            self.is_trained = False
 
     def get_stats(self) -> Dict[str, Any]:
         """Get model statistics."""
         stats = {
             "is_trained": self.is_trained,
+            "tensorflow_available": _is_tensorflow_available(),
             "feature_count": len(self.feature_names),
             "encoding_dim": self.encoding_dim,
-            "train_error_mean": getattr(self, "train_error_mean", 0),
-            "train_error_std": getattr(self, "train_error_std", 1),
+            "train_error_mean": self.train_error_mean,
+            "train_error_std": self.train_error_std,
             "anomaly_threshold": self.anomaly_threshold,
         }
 
@@ -300,13 +354,13 @@ class AutoencoderAnomalyDetector(LoggerMixin):
                 "epochs_trained": len(self.training_history.get("loss", [])),
             }
 
-        if self.model:
-            stats["model_summary"] = str(self.model.summary())
-
         return stats
 
     def get_reconstruction_importance(self, features: Dict[str, float]) -> Dict[str, float]:
         """Get feature importance based on reconstruction error."""
+        if not _is_tensorflow_available():
+            return {}
+
         if not self.is_trained or self.model is None:
             return {}
 

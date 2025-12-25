@@ -1,0 +1,13 @@
+storage:
+  local_path: ./data
+  compression: true
+  
+  elasticsearch:
+    enabled: false  # Set to false to disable Elasticsearch
+    host: localhost
+    port: 9200
+    username: ""
+    password: ""
+    use_ssl: false
+    verify_certs: false
+    index_prefix: ai-soc

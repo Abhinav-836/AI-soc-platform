@@ -1,0 +1,53 @@
+AI SOC Platform – Prototype License
+
+Copyright (c) 2026 Abhinav Ashutosh
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to use,
+copy, modify, and distribute the Software, subject to the following conditions:
+
+1. PURPOSE
+This Software is provided as a PROTOTYPE / RESEARCH FRAMEWORK intended for:
+- Educational use
+- Academic projects
+- Research and experimentation
+- Training and demonstration purposes
+- Early-stage product development
+
+2. COMMERCIAL USE
+Commercial use is permitted provided that:
+- The Software is not resold as a competing SOC/SIEM product in its original form
+- The author is credited in documentation or product acknowledgments
+- The Software is clearly represented as a prototype or foundation, not a
+  production-ready security solution
+
+3. RESTRICTIONS
+You may NOT:
+- Claim this Software is production-ready or enterprise-grade
+- Use this Software as a managed security service for third parties
+- Hold the author liable for security incidents, data loss, or damages
+- Remove or alter this license notice
+
+4. NO WARRANTY
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+
+5. LIMITATION OF LIABILITY
+IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM,
+OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+6. SECURITY DISCLAIMER
+This Software DOES NOT guarantee threat detection accuracy and SHOULD NOT be
+used as a sole security control in production environments.
+
+7. TERMINATION
+Failure to comply with the terms of this license will result in automatic
+termination of the rights granted herein.
+
+---
+
+Author: Abhinav Ashutosh
+Project: AI SOC Platform (Prototype)

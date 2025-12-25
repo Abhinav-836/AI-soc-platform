@@ -9,7 +9,7 @@ import aiofiles
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
 
-from src.utils.logger import LoggerMixin
+from src.core.logger import LoggerMixin
 
 
 class ThreatIntelFeed(LoggerMixin):

@@ -9,8 +9,8 @@ import signal
 import sys
 from typing import Optional
 
-from src.utils.logger import setup_logging
-from src.utils.config_loader import ConfigLoader
+from src.core.logger import setup_logging
+from src.core.config_loader import ConfigLoader
 from src.ingestion.pipeline import IngestionPipeline
 from src.detection.detector import DetectionEngine
 from src.response.executor import ResponseExecutor

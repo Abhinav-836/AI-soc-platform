@@ -1,6 +1,19 @@
-﻿name: Test SOC
-version: 0.1.0
-environment: development
-debug: true
-workers: 4
-timezone: UTC
+﻿app:
+  name: AI SOC Platform
+  version: 1.0.0
+  environment: production
+  debug: false
+  workers: 4
+  timezone: UTC
+
+# Server settings
+server:
+  host: 0.0.0.0
+  port: 8080
+  reload: false
+
+# Security
+security:
+  secret_key: "${SECRET_KEY}"
+  jwt_expiry_hours: 24
+  bcrypt_rounds: 12

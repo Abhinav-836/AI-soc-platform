@@ -4,10 +4,10 @@ Ingestion pipeline orchestrator.
 
 import asyncio
 import json
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Callable
 from datetime import datetime
 
-from src.utils.logger import LoggerMixin
+from src.core.logger import LoggerMixin
 from src.ingestion.collectors.file_collector import FileCollector
 from src.ingestion.collectors.syslog_collector import SyslogCollector
 from src.ingestion.collectors.kafka_collector import KafkaCollector
@@ -17,13 +17,14 @@ from src.ingestion.parsers.normalizer import LogNormalizer
 class IngestionPipeline(LoggerMixin):
     """Orchestrates log ingestion from multiple sources."""
 
-    def __init__(self, config):
+    def __init__(self, config, event_handler: Callable = None):
         super().__init__()
         self.config = config
         self.running = False
         self.collectors: List[Any] = []
         self.normalizer = LogNormalizer(config)
         self.queue = asyncio.Queue(maxsize=10000)
+        self.event_handler = event_handler  # Callback for detection engine
 
     async def start(self):
         """Start the ingestion pipeline."""
@@ -119,12 +120,11 @@ class IngestionPipeline(LoggerMixin):
                 normalized["@timestamp"] = datetime.utcnow().isoformat() + "Z"
                 normalized["ingestion_timestamp"] = datetime.utcnow().isoformat()
 
-                # TODO: Send to storage/detection engine
-                self.logger.debug(f"Processed message: {normalized.get('event_type', 'unknown')}")
+                # Forward to detection engine via event handler
+                if self.event_handler:
+                    await self.event_handler(normalized)
 
-                # For now, just log
-                if self.logger.isEnabledFor(10):  # DEBUG level
-                    self.logger.debug(f"Normalized event: {json.dumps(normalized, indent=2)}")
+                self.logger.debug(f"Processed message: {normalized.get('event_type', 'unknown')}")
 
         except Exception as e:
             self.logger.error(f"Error normalizing message: {e}", exc_info=True)
@@ -143,6 +143,9 @@ class IngestionPipeline(LoggerMixin):
             normalized = await self.normalizer.normalize(raw_data)
             if normalized:
                 normalized["@timestamp"] = datetime.utcnow().isoformat() + "Z"
+                # Forward to detection engine
+                if self.event_handler:
+                    await self.event_handler(normalized)
                 return normalized
         except Exception as e:
             self.logger.error(f"Error ingesting raw data: {e}", exc_info=True)

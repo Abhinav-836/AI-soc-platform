@@ -3,5 +3,56 @@
     enabled: true
     paths:
       - data/raw/test.jsonl
-parsers: {}
-normalization: {}
+      - data/raw/*.log
+    watch_interval: 1
+
+  syslog:
+    enabled: false
+    host: "0.0.0.0"
+    port: 514
+    protocol: "udp"
+
+  kafka:
+    enabled: false
+    bootstrap_servers: "localhost:9092"
+    topics:
+      - "security-logs"
+      - "network-logs"
+    group_id: "ai-soc-consumer"
+
+  websocket:
+    enabled: true
+    path: "/ws/logs"
+
+parsers:
+  json:
+    enabled: true
+    timestamp_field: "@timestamp"
+    message_field: "message"
+
+  cef:
+    enabled: true
+    version: 0
+
+  regex:
+    enabled: true
+    patterns:
+      ssh_failed: 'Failed password for (?P<user>\S+) from (?P<src_ip>\S+)'
+      ssh_accepted: 'Accepted password for (?P<user>\S+) from (?P<src_ip>\S+)'
+
+normalization:
+  timestamp_formats:
+    - "%Y-%m-%dT%H:%M:%S.%fZ"
+    - "%Y-%m-%d %H:%M:%S"
+    - "%d/%b/%Y:%H:%M:%S %z"
+
+  ip_fields:
+    - "src_ip"
+    - "dst_ip"
+    - "client_ip"
+    - "server_ip"
+
+  rename_fields:
+    src_ip: "source_ip"
+    dst_ip: "destination_ip"
+    timestamp: "@timestamp"

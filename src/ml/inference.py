@@ -7,7 +7,7 @@ import pandas as pd
 from typing import Dict, List, Any, Tuple, Optional
 from datetime import datetime
 
-from src.utils.logger import LoggerMixin
+from src.core.logger import LoggerMixin
 from src.ml.anomaly.isolation_forest import IsolationForestAnomalyDetector
 from src.ml.anomaly.autoencoder import AutoencoderAnomalyDetector
 

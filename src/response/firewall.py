@@ -7,7 +7,7 @@ import ipaddress
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timedelta
 import asyncio
-from src.utils.logger import LoggerMixin
+from src.core.logger import LoggerMixin
 
 
 class FirewallManager(LoggerMixin):

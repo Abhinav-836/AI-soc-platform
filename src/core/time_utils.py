@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Union
 
+
 class TimeUtils:
     """Utility functions for time operations."""
     

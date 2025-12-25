@@ -27,11 +27,9 @@ class JSONFormatter(logging.Formatter):
             "line": record.lineno,
         }
 
-        # Add exception info if present
         if record.exc_info:
             log_record["exception"] = self.formatException(record.exc_info)
 
-        # Add extra fields
         if hasattr(record, "extra"):
             log_record.update(record.extra)
 
@@ -42,16 +40,7 @@ def setup_logging(
     config_path: Optional[str] = None,
     default_level: int = logging.INFO,
 ) -> logging.Logger:
-    """
-    Set up logging configuration.
-
-    Args:
-        config_path: Path to logging YAML config
-        default_level: Default logging level
-
-    Returns:
-        Root logger
-    """
+    """Set up logging configuration."""
     if config_path:
         try:
             with open(config_path, "r") as f:
@@ -71,7 +60,6 @@ def setup_default_logging(level: int = logging.INFO):
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
 
-    # Console handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(level)
 
@@ -81,10 +69,7 @@ def setup_default_logging(level: int = logging.INFO):
     )
     console_handler.setFormatter(formatter)
 
-    # Remove existing handlers
     root_logger.handlers.clear()
-
-    # Add console handler
     root_logger.addHandler(console_handler)
 
 
@@ -101,12 +86,6 @@ class LoggerMixin:
         """Log with additional context."""
         extra = kwargs.copy()
         extra.update(getattr(self, "context", {}))
-
-        log_record = {
-            "message": message,
-            "extra": extra,
-        }
-
         self.logger.log(level, message, extra={"extra_fields": extra})
 
 

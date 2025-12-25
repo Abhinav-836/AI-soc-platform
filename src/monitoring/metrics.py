@@ -7,7 +7,7 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-from src.utils.logger import LoggerMixin
+from src.core.logger import LoggerMixin
 
 
 class MetricsCollector(LoggerMixin):

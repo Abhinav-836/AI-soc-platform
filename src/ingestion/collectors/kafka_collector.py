@@ -10,7 +10,7 @@ from datetime import datetime
 from kafka import KafkaConsumer
 from kafka.errors import NoBrokersAvailable
 
-from src.utils.logger import LoggerMixin
+from src.core.logger import LoggerMixin
 
 
 class KafkaCollector(LoggerMixin):

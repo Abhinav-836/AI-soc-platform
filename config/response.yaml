@@ -2,6 +2,8 @@ playbooks:
   block_ip:
     enabled: true
     description: "Block malicious IP address"
+    stop_on_failure: true
+    require_approval: true
     actions:
       - name: "enrich_ip_info"
         provider: "abuseipdb"
@@ -27,6 +29,8 @@ playbooks:
   brute_force_response:
     enabled: true
     description: "Respond to brute force attacks"
+    stop_on_failure: false
+    require_approval: false
     triggers:
       - "CUSTOM-001"
       - "SIGMA-SSH-BruteForce"
@@ -53,6 +57,8 @@ playbooks:
   malware_containment:
     enabled: true
     description: "Contain malware infection"
+    stop_on_failure: true
+    require_approval: true
     actions:
       - name: "isolate_host"
         provider: "edr"
@@ -118,7 +124,13 @@ approval:
     - "isolate_host"
     - "quarantine_file"
 
-  approval_timeout: 300  # seconds
+  approval_timeout: 300
   approvers:
     - "soc-lead@example.com"
     - "security-manager@example.com"
+
+# Add rate limiting
+rate_limits:
+  enabled: true
+  requests_per_minute: 100
+  burst: 20
