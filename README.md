@@ -246,8 +246,9 @@ normalization: {}
 # Generate test logs
 python scripts/generate_logs.py --count 50 --output data/raw/test.jsonl
 
-# Run SOC pipeline
-python -m src.main --mode oneshot
+# Run SOC pipeline and backend -
+python run.py
+**FOR UI**- http://127.0.0.1:8080/ui/index.html
 
 
 ### 1️⃣ Install dependencies
