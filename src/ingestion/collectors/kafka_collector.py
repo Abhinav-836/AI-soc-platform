@@ -1,141 +1,94 @@
 """
-Kafka-based log collector.
-"""
+Kafka collector.
 
+Fixes:
+  * `from kafka.errors import NoBrokersAvailable` at import time crashed the
+    whole platform on kafka-python 3.x (the class was removed) - even with
+    Kafka disabled. kafka-python is now imported only when Kafka is enabled.
+  * consumer.poll() is blocking; it ran directly on the event loop and froze
+    the API/WebSocket for up to a second per poll. It now runs in a thread.
+  * JSON messages were wrapped as raw_message dicts that no parser handled.
+  * KAFKA_BOOTSTRAP_SERVERS from the environment/docker-compose was ignored.
+"""
 import asyncio
 import json
-from typing import Dict, Any, Optional
-from datetime import datetime
-
-from kafka import KafkaConsumer
-from kafka.errors import NoBrokersAvailable
+import os
+from typing import Any, Dict, Optional
 
 from src.core.logger import LoggerMixin
+from src.core.time_utils import iso
 
 
 class KafkaCollector(LoggerMixin):
-    """Collects logs from Kafka topics."""
-
     def __init__(self, config):
-        super().__init__()
-        self.config = config
+        cfg = ((config.get("ingestion", {}) or {}).get("sources", {}) or {}).get("kafka", {}) or {}
+        servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS") or cfg.get("bootstrap_servers", "localhost:9092")
+        self.servers = [s.strip() for s in servers.split(",")] if isinstance(servers, str) else servers
+        self.topics = cfg.get("topics", ["security-logs"])
+        self.group_id = cfg.get("group_id", "ai-soc-consumer")
+        self.offset_reset = cfg.get("auto_offset_reset", "latest")
+        self.consumer: Optional[Any] = None
         self.running = False
-        self.consumer: Optional[KafkaConsumer] = None
-        self.stats = {
-            "messages_received": 0,
-            "topics_subscribed": 0,
-            "last_received": None,
-            "errors": 0,
-            "rebalances": 0,
-        }
+        self.stats = {"messages_received": 0, "last_received": None, "errors": 0, "connected": False}
+
+    def _connect(self):
+        from kafka import KafkaConsumer  # lazy: optional dependency
+        return KafkaConsumer(*self.topics, bootstrap_servers=self.servers, group_id=self.group_id,
+                             auto_offset_reset=self.offset_reset, enable_auto_commit=True)
 
     async def start(self, queue: asyncio.Queue):
-        """Start Kafka consumer."""
-        self.logger.info("Starting Kafka collector...")
         self.running = True
+        loop = asyncio.get_running_loop()
+        while self.running and self.consumer is None:
+            try:
+                self.consumer = await loop.run_in_executor(None, self._connect)
+                self.stats["connected"] = True
+                self.logger.info(f"Kafka consumer subscribed to {self.topics} on {self.servers}")
+            except ImportError:
+                self.logger.error("Kafka source enabled but kafka-python is not installed")
+                self.running = False
+                return
+            except Exception as e:
+                self.stats["errors"] += 1
+                self.logger.warning(f"Kafka not reachable ({e}); retrying in 10s")
+                await asyncio.sleep(10)
 
-        config = self.config.get("ingestion", {}).get("sources", {}).get("kafka", {})
-        bootstrap_servers = config.get("bootstrap_servers", "localhost:9092")
-        topics = config.get("topics", [])
-        group_id = config.get("group_id", "ai-soc-consumer")
-        auto_offset_reset = config.get("auto_offset_reset", "latest")
+        while self.running:
+            try:
+                batch = await loop.run_in_executor(None, lambda: self.consumer.poll(timeout_ms=1000))
+            except Exception as e:
+                self.stats["errors"] += 1
+                self.logger.error(f"Kafka poll failed: {e}")
+                await asyncio.sleep(2)
+                continue
+            for records in batch.values():
+                for record in records:
+                    await queue.put(self._to_event(record))
+                    self.stats["messages_received"] += 1
+                    self.stats["last_received"] = iso()
 
+    @staticmethod
+    def _to_event(record) -> Dict[str, Any]:
+        raw = record.value.decode("utf-8", errors="replace") if isinstance(record.value, bytes) else record.value
         try:
-            # Create Kafka consumer
-            self.consumer = KafkaConsumer(
-                *topics,
-                bootstrap_servers=bootstrap_servers,
-                group_id=group_id,
-                auto_offset_reset=auto_offset_reset,
-                enable_auto_commit=True,
-                value_deserializer=lambda x: json.loads(x.decode('utf-8')),
-                consumer_timeout_ms=1000,
-            )
-
-            self.stats["topics_subscribed"] = len(topics)
-            self.logger.info(f"Subscribed to topics: {topics}")
-
-            # Start consuming messages
-            while self.running:
-                await self._consume_messages(queue)
-
-        except NoBrokersAvailable:
-            self.logger.error("No Kafka brokers available")
-            await self.stop()
-        except Exception as e:
-            self.logger.error(f"Error in Kafka collector: {e}", exc_info=True)
-            await self.stop()
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            event = dict(data)
+        else:
+            event = {"raw_message": str(raw)}
+        event["source_type"] = "kafka"
+        event.setdefault("kafka_topic", record.topic)
+        return event
 
     async def stop(self):
-        """Stop Kafka consumer."""
-        self.logger.info("Stopping Kafka collector...")
         self.running = False
-
         if self.consumer:
-            self.consumer.close()
-
-    async def _consume_messages(self, queue: asyncio.Queue):
-        """Consume messages from Kafka."""
-        try:
-            # Poll for messages
-            raw_messages = self.consumer.poll(timeout_ms=1000)
-
-            for topic_partition, messages in raw_messages.items():
-                for message in messages:
-                    await self._process_message(message, queue)
-
-            # Handle consumer rebalance
-            self._handle_rebalances()
-
-        except Exception as e:
-            self.logger.error(f"Error consuming messages: {e}", exc_info=True)
-            self.stats["errors"] += 1
-            await asyncio.sleep(1)
-
-    async def _process_message(self, message, queue: asyncio.Queue):
-        """Process a single Kafka message."""
-        try:
-            # Create log event
-            event = {
-                "raw_message": message.value,
-                "source_type": "kafka",
-                "topic": message.topic,
-                "partition": message.partition,
-                "offset": message.offset,
-                "timestamp": message.timestamp,
-                "@timestamp": datetime.utcnow().isoformat() + "Z",
-            }
-
-            # Put in queue
-            await queue.put(event)
-
-            # Update stats
-            self.stats["messages_received"] += 1
-            self.stats["last_received"] = datetime.utcnow().isoformat()
-
-            self.logger.debug(f"Received Kafka message from {message.topic}:{message.partition}")
-
-        except Exception as e:
-            self.logger.error(f"Error processing Kafka message: {e}", exc_info=True)
-            self.stats["errors"] += 1
-
-    def _handle_rebalances(self):
-        """Handle consumer rebalance events."""
-        # Check for assignment changes
-        assignment = self.consumer.assignment()
-        
-        # Log rebalance events (simplified - in production use proper rebalance listeners)
-        if hasattr(self, '_last_assignment') and self._last_assignment != assignment:
-            self.logger.info(f"Consumer rebalanced. New assignment: {assignment}")
-            self.stats["rebalances"] += 1
-        
-        self._last_assignment = assignment
+            try:
+                self.consumer.close()
+            except Exception:
+                pass
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get collector statistics."""
-        return {
-            "type": "kafka",
-            "running": self.running,
-            **self.stats,
-            "consumer_assignment": str(self.consumer.assignment()) if self.consumer else None,
-        }
+        return {"type": "kafka", "running": self.running, "topics": self.topics, **self.stats}

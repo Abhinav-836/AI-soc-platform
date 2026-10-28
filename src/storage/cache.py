@@ -1,39 +1,42 @@
-import redis
-import json
-from typing import Any, Optional
+"""Small thread-safe TTL cache (used for threat-intel lookups)."""
+import threading
+import time
+from typing import Any, Dict, Optional, Tuple
 
-class CacheStorage:
-    """Redis cache storage."""
-    
-    def __init__(self, host: str, port: int, db: int = 0):
-        self.client = redis.Redis(host=host, port=port, db=db, decode_responses=True)
-    
-    def set(self, key: str, value: Any, ttl: Optional[int] = None):
-        """Set cache value with optional TTL."""
-        serialized = json.dumps(value)
-        if ttl:
-            self.client.setex(key, ttl, serialized)
-        else:
-            self.client.set(key, serialized)
-    
+
+class TTLCache:
+    def __init__(self, ttl_seconds: float = 3600, max_items: int = 10000):
+        self.ttl = ttl_seconds
+        self.max_items = max_items
+        self._data: Dict[str, Tuple[float, Any]] = {}
+        self._lock = threading.Lock()
+
     def get(self, key: str) -> Optional[Any]:
-        """Get cache value."""
-        value = self.client.get(key)
-        return json.loads(value) if value else None
-    
-    def delete(self, key: str):
-        """Delete cache key."""
-        self.client.delete(key)
-    
-    def increment(self, key: str, amount: int = 1) -> int:
-        """Increment counter."""
-        return self.client.incrby(key, amount)
-    
-    def get_counter(self, key: str) -> int:
-        """Get counter value."""
-        value = self.client.get(key)
-        return int(value) if value else 0
-    
-    def set_with_expiry(self, key: str, value: Any, seconds: int):
-        """Set value with expiration."""
-        self.set(key, value, ttl=seconds)
+        with self._lock:
+            item = self._data.get(key)
+            if not item:
+                return None
+            expires, value = item
+            if expires < time.time():
+                del self._data[key]
+                return None
+            return value
+
+    def set(self, key: str, value: Any, ttl: Optional[float] = None):
+        with self._lock:
+            if len(self._data) >= self.max_items:
+                # drop the entry closest to expiry
+                oldest = min(self._data, key=lambda k: self._data[k][0])
+                del self._data[oldest]
+            self._data[key] = (time.time() + (ttl or self.ttl), value)
+
+    def clear(self):
+        with self._lock:
+            self._data.clear()
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+
+# old name
+CacheStorage = TTLCache

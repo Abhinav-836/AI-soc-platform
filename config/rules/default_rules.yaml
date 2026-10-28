@@ -1,0 +1,134 @@
+# Detection rules. Format: see src/detection/rules/custom_rules.py
+# Add your own in this folder or in <data dir>/rules/ (survives app updates).
+
+- id: SOC-001
+  name: SSH / RDP brute force
+  description: Many failed logins from one source in a short time.
+  severity: high
+  category: brute_force
+  mitre: [T1110.001]
+  match:
+    event_type: [ssh_failed, rdp_failed, web_auth_failed]
+  threshold: {count: 6, window: 5m, group_by: [src_ip]}
+  cooldown: 15m
+  response: [block_ip]
+
+- id: SOC-002
+  name: Password spraying
+  description: One source failing logins for many different user names.
+  severity: high
+  category: brute_force
+  mitre: [T1110.003]
+  match:
+    event_type: [ssh_failed, rdp_failed, web_auth_failed]
+  threshold: {count: 4, distinct: user, window: 10m, group_by: [src_ip]}
+  cooldown: 15m
+  response: [block_ip]
+
+- id: SOC-003
+  name: Port scan
+  description: One source probing many different ports.
+  severity: medium
+  category: reconnaissance
+  mitre: [T1046, T1595]
+  match:
+    event_type: [firewall_drop, connection_attempt]
+  threshold: {count: 10, distinct: dst_port, window: 2m, group_by: [src_ip]}
+  cooldown: 15m
+  response: [block_ip]
+
+- id: SOC-004
+  name: Web application attack
+  description: Repeated web-application-firewall signature hits from one client.
+  severity: high
+  category: web_attack
+  mitre: [T1190]
+  match:
+    event_type: waf_alert
+  threshold: {count: 3, window: 5m, group_by: [src_ip]}
+  cooldown: 15m
+  response: [block_ip]
+
+- id: SOC-005
+  name: Malware detected on endpoint
+  description: Endpoint protection reported a malicious process.
+  severity: critical
+  category: malware
+  mitre: [T1204]
+  match:
+    edr_verdict: malicious
+    edr_category|not: credential_access
+  group_by: [hostname]
+  cooldown: 30m
+  response: [isolate_host]
+
+- id: SOC-006
+  name: Credential access tool detected
+  description: Endpoint protection reported a credential-access tool.
+  severity: critical
+  category: credential_access
+  mitre: [T1003]
+  match:
+    edr_verdict: malicious
+    edr_category: credential_access
+  group_by: [hostname]
+  cooldown: 30m
+  response: [isolate_host]
+
+- id: SOC-007
+  name: Large outbound data transfer
+  description: A host sent an unusually large volume of data to one external destination.
+  severity: high
+  category: exfiltration
+  mitre: [T1048, T1567]
+  match:
+    event_type: network_connection
+    dst_ip|private: false
+  threshold: {sum: bytes_out, value: 100000000, window: 10m, group_by: [src_ip, dst_ip]}
+  cooldown: 30m
+  response: [isolate_host]
+
+- id: SOC-008
+  name: Possible DNS tunneling
+  description: Many DNS queries with very long random labels from one host.
+  severity: high
+  category: command_and_control
+  mitre: [T1071.004]
+  match:
+    event_type: dns_query
+    query|re: "^[a-z0-9]{30,}\\."
+  threshold: {count: 10, window: 5m, group_by: [src_ip]}
+  cooldown: 30m
+
+- id: SOC-009
+  name: New user account created
+  severity: medium
+  category: persistence
+  mitre: [T1136]
+  match:
+    event_type: user_created
+  group_by: [hostname]
+  cooldown: 30m
+
+- id: SOC-010
+  name: Account added to an admin group
+  severity: high
+  category: persistence
+  mitre: [T1098]
+  match:
+    event_type: group_change
+    group: [sudo, wheel, administrators, domain admins]
+  group_by: [hostname]
+  cooldown: 30m
+
+- id: SOC-011
+  name: Web content scanning
+  description: Many "not found" responses for one client - automated scanning.
+  severity: low
+  category: reconnaissance
+  mitre: [T1595]
+  match:
+    event_type: http_request
+    status_code: 404
+  threshold: {count: 20, window: 2m, group_by: [src_ip]}
+  cooldown: 30m

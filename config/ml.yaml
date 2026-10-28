@@ -1,62 +1,10 @@
-models:
-  anomaly:
-    isolation_forest:
-      enabled: true
-      n_estimators: 100
-      contamination: 0.01
-      max_features: 1.0
-      bootstrap: false
-      random_state: 42
-
-    autoencoder:
-      enabled: false  # Keep false to avoid TensorFlow issues
-
-  supervised:
-    random_forest:
-      enabled: true
-      n_estimators: 100
-      max_depth: 20
-      min_samples_split: 2
-      min_samples_leaf: 1
-
-    xgboost:
-      enabled: false
-      max_depth: 6
-      learning_rate: 0.1
-      n_estimators: 100
-      objective: "binary:logistic"
-
-features:
-  network:
-    - "src_ip_entropy"
-    - "dst_port_entropy"
-    - "packet_size_mean"
-    - "packet_size_std"
-    - "bytes_per_second"
-    - "packets_per_second"
-    - "unique_ports_per_ip"
-
-  host:
-    - "process_count"
-    - "unique_users"
-    - "failed_logins_per_hour"
-    - "successful_logins_per_hour"
-    - "file_access_count"
-
-training:
-  retrain_interval: 86400
-  test_size: 0.2
-  validation_size: 0.1
-  cv_folds: 5
-  random_state: 42
-
-inference:
-  batch_size: 1000
-  confidence_threshold: 0.85
-  anomaly_threshold: 0.95
-
-drift_detection:
+model:
   enabled: true
-  window_size: 10000
-  threshold: 0.05
-  check_interval: 3600
+  quantile: 0.999            # per-feature "normal maximum" learned from normal traffic
+  margin: 2.0                # how far beyond normal (in IQR units) counts as anomalous
+  high_severity_excess: 6.0  # anomaly score at which the alert becomes high severity
+  skip_sources: [host]       # not scored until the model is retrained on your own recent events
+
+# Training data: simulated normal traffic by default. To learn YOUR network's
+# normal: Detection -> Retrain on recent events (needs 1000+ stored events),
+# or: python run.py train --input your_normal_logs.jsonl

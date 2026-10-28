@@ -1,0 +1,16 @@
+.git
+.github
+**/__pycache__
+**/*.pyc
+.pytest_cache
+venv
+.venv
+.venv-desktop
+data
+logs
+build
+dist
+desktop
+docs
+tests
+*.env

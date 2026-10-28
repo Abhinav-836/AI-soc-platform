@@ -1,357 +1,279 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI SOC Platform - Security Operations Center</title>
-    <link rel="stylesheet" href="css/style.css">
-    <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI SOC Platform</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%232563eb' d='M16 2 4 7v8c0 7.2 5.1 13.9 12 15 6.9-1.1 12-7.8 12-15V7L16 2z'/%3E%3C/svg%3E">
+  <script>
+    // apply the saved theme before first paint (no flash)
+    (function () {
+      var t = 'auto';
+      try { t = localStorage.getItem('soc.theme') || 'auto'; } catch (e) {}
+      var dark = t === 'dark' || (t === 'auto' && window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches);
+      document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+    })();
+  </script>
+  <link rel="stylesheet" href="css/style.css">
+  <script src="vendor/chart.umd.min.js"></script>
 </head>
 <body>
-    <div class="matrix-bg"></div>
-    <div class="container">
-        <!-- Header -->
-        <header class="header">
-            <div class="logo">
-                <div class="logo-icon">🛡️</div>
-                <div class="logo-text">
-                    <span class="glitch" data-text="AI SOC PLATFORM">AI SOC PLATFORM</span>
-                    <small>Security Operations Center v1.0</small>
-                </div>
-            </div>
-            <div class="status-bar">
-                <div class="status-item">
-                    <span class="status-label">System:</span>
-                    <span class="status-value online" id="systemStatus">ONLINE</span>
-                </div>
-                <div class="status-item">
-                    <span class="status-label">WebSocket:</span>
-                    <span class="status-value" id="wsStatus">CONNECTING</span>
-                </div>
-                <div class="status-item">
-                    <span class="status-label">Alerts Today:</span>
-                    <span class="status-value" id="alertCount">0</span>
-                </div>
-                <div class="status-item">
-                    <span class="status-label">Uptime:</span>
-                    <span class="status-value" id="uptime">00:00:00</span>
-                </div>
-            </div>
-        </header>
+<div class="layout">
+  <!-- ======================================================= SIDEBAR -->
+  <aside class="sidebar">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" class="brand-mark"><path d="M12 2 4 5.5v6c0 5 3.4 9.4 8 10.5 4.6-1.1 8-5.5 8-10.5v-6L12 2z"/><path d="m8.5 12 2.5 2.5 4.5-5" class="tick"/></svg>
+      <div><div class="brand-name">AI SOC</div><div class="brand-sub">Security Operations</div></div>
+    </div>
+    <nav id="nav">
+      <a data-page="overview" class="active"><svg viewBox="0 0 24 24"><path d="M3 13h8V3H3zM13 21h8V11h-8zM3 21h8v-6H3zM13 3v6h8V3z"/></svg>Overview</a>
+      <a data-page="alerts"><svg viewBox="0 0 24 24"><path d="M12 3 2 20h20L12 3zM12 9v5M12 17v.5"/></svg>Alerts<span class="count" id="navAlerts"></span></a>
+      <a data-page="investigate"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>Investigate</a>
+      <a data-page="events"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>Events</a>
+      <a data-page="intel"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>Threat intel</a>
+      <a data-page="response"><svg viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>Response<span class="count" id="navPending"></span></a>
+      <a data-page="detection"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h6"/><circle cx="18" cy="16" r="3"/></svg>Detection</a>
+      <a data-page="sources"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>Data sources</a>
+      <a data-page="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings</a>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="status-line"><span class="dot" id="dotWs"></span><span id="txtWs">Connecting…</span></div>
+      <div class="status-line"><span class="dot" id="dotMode"></span><span id="txtMode">Response mode</span></div>
+      <div class="status-line"><span class="dot" id="dotMl"></span><span id="txtMl">ML model</span></div>
+      <button class="theme-btn" id="themeBtn" title="Switch theme">Switch light / dark</button>
+    </div>
+  </aside>
 
-        <!-- Navigation -->
-        <nav class="nav">
-            <button class="nav-btn active" data-page="dashboard">📊 DASHBOARD</button>
-            <button class="nav-btn" data-page="alerts">🚨 ALERTS</button>
-            <button class="nav-btn" data-page="events">📡 EVENTS</button>
-            <button class="nav-btn" data-page="intel">🔍 THREAT INTEL</button>
-            <button class="nav-btn" data-page="response">⚡ RESPONSE</button>
-            <button class="nav-btn" data-page="settings">⚙️ SETTINGS</button>
-        </nav>
+  <!-- ======================================================= MAIN -->
+  <div class="main">
+    <header class="topbar">
+      <h1 id="pageTitle">Overview</h1>
+      <form id="globalSearch" class="global-search" autocomplete="off">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+        <input id="globalSearchInput" placeholder="Investigate an IP, host or user…">
+      </form>
+      <span class="updated" id="lastUpdated"></span>
+    </header>
 
-        <!-- Dashboard Page -->
-        <div id="dashboardPage" class="page active">
-            <!-- Stats Cards -->
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <div class="stat-icon">📊</div>
-                    <div class="stat-info">
-                        <div class="stat-value" id="statEventsPerSec">0</div>
-                        <div class="stat-label">Events/sec</div>
-                    </div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon">🚨</div>
-                    <div class="stat-info">
-                        <div class="stat-value" id="statTotalAlerts">0</div>
-                        <div class="stat-label">Total Alerts</div>
-                    </div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon">⚠️</div>
-                    <div class="stat-info">
-                        <div class="stat-value" id="statCriticalAlerts">0</div>
-                        <div class="stat-label">Critical</div>
-                    </div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon">🔄</div>
-                    <div class="stat-info">
-                        <div class="stat-value" id="statActiveRules">0</div>
-                        <div class="stat-label">Active Rules</div>
-                    </div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon">🔌</div>
-                    <div class="stat-info">
-                        <div class="stat-value" id="statConnections">0</div>
-                        <div class="stat-label">WS Connections</div>
-                    </div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon">🤖</div>
-                    <div class="stat-info">
-                        <div class="stat-value" id="statMLInferences">0</div>
-                        <div class="stat-label">ML Inferences</div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Charts Row -->
-            <div class="charts-row">
-                <div class="chart-card">
-                    <div class="chart-title">Alert Timeline</div>
-                    <canvas id="alertTimelineChart"></canvas>
-                </div>
-                <div class="chart-card">
-                    <div class="chart-title">Alert Severity Distribution</div>
-                    <canvas id="severityChart"></canvas>
-                </div>
-            </div>
-
-            <div class="charts-row">
-                <div class="chart-card">
-                    <div class="chart-title">Top Attack Sources</div>
-                    <canvas id="topSourcesChart"></canvas>
-                </div>
-                <div class="chart-card">
-                    <div class="chart-title">Event Types</div>
-                    <canvas id="eventTypesChart"></canvas>
-                </div>
-            </div>
-
-            <!-- Recent Alerts -->
-            <div class="recent-alerts">
-                <div class="section-header">
-                    <h3>🔔 RECENT ALERTS</h3>
-                    <button class="view-all-btn" onclick="loadAlertsPage()">View All →</button>
-                </div>
-                <div class="alerts-table-container">
-                    <table class="alerts-table">
-                        <thead>
-                            <tr>
-                                <th>Time</th>
-                                <th>Severity</th>
-                                <th>Rule</th>
-                                <th>Source</th>
-                                <th>Status</th>
-                                <th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody id="recentAlertsTable">
-                            <tr><td colspan="6" class="loading">Loading alerts...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-
-        <!-- Alerts Page -->
-        <div id="alertsPage" class="page">
-            <div class="page-header">
-                <h2>🚨 Security Alerts</h2>
-                <div class="filter-bar">
-                    <select id="alertSeverityFilter">
-                        <option value="">All Severities</option>
-                        <option value="critical">Critical</option>
-                        <option value="high">High</option>
-                        <option value="medium">Medium</option>
-                        <option value="low">Low</option>
-                    </select>
-                    <select id="alertStatusFilter">
-                        <option value="">All Status</option>
-                        <option value="new">New</option>
-                        <option value="investigating">Investigating</option>
-                        <option value="contained">Contained</option>
-                        <option value="resolved">Resolved</option>
-                    </select>
-                    <button id="refreshAlertsBtn" class="btn-secondary">⟳ Refresh</button>
-                </div>
-            </div>
-            <div class="alerts-table-container">
-                <table class="alerts-table">
-                    <thead>
-                        <tr>
-                            <th>Time</th>
-                            <th>Alert ID</th>
-                            <th>Severity</th>
-                            <th>Rule Name</th>
-                            <th>Score</th>
-                            <th>Status</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="alertsTableBody">
-                        <tr><td colspan="7" class="loading">Loading alerts...</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- Events Page -->
-        <div id="eventsPage" class="page">
-            <div class="page-header">
-                <h2>📡 Live Events Stream</h2>
-                <div class="controls">
-                    <button id="toggleEventsBtn" class="btn-primary">⏸️ Pause Stream</button>
-                    <button id="clearEventsBtn" class="btn-secondary">🗑️ Clear</button>
-                </div>
-            </div>
-            <div class="events-stream" id="eventsStream">
-                <div class="stream-placeholder">Waiting for events...</div>
-            </div>
-        </div>
-
-        <!-- Threat Intel Page -->
-        <div id="intelPage" class="page">
-            <div class="page-header">
-                <h2>🔍 Threat Intelligence</h2>
-                <div class="search-bar">
-                    <input type="text" id="iocSearchInput" placeholder="Search IOCs (IP, domain, hash)...">
-                    <button id="searchIocsBtn">🔍 Search</button>
-                </div>
-            </div>
-            <div class="stats-row">
-                <div class="mini-stat">
-                    <span class="mini-stat-value" id="totalIOCs">0</span>
-                    <span class="mini-stat-label">Total IOCs</span>
-                </div>
-                <div class="mini-stat">
-                    <span class="mini-stat-value" id="ipIOCs">0</span>
-                    <span class="mini-stat-label">IP Addresses</span>
-                </div>
-                <div class="mini-stat">
-                    <span class="mini-stat-value" id="domainIOCs">0</span>
-                    <span class="mini-stat-label">Domains</span>
-                </div>
-                <div class="mini-stat">
-                    <span class="mini-stat-value" id="hashIOCs">0</span>
-                    <span class="mini-stat-label">File Hashes</span>
-                </div>
-            </div>
-            <div class="iocs-table-container">
-                <table class="iocs-table">
-                    <thead>
-                        <tr>
-                            <th>Type</th>
-                            <th>Value</th>
-                            <th>Source</th>
-                            <th>Confidence</th>
-                            <th>First Seen</th>
-                        </tr>
-                    </thead>
-                    <tbody id="iocsTableBody">
-                        <tr><td colspan="5" class="loading">Loading IOCs...</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- Response Page -->
-        <div id="responsePage" class="page">
-            <div class="page-header">
-                <h2>⚡ Automated Response</h2>
-            </div>
-            <div class="playbooks-grid">
-                <div class="playbook-card">
-                    <div class="playbook-icon">🚫</div>
-                    <div class="playbook-info">
-                        <h4>Block IP Address</h4>
-                        <p>Block malicious IP across network infrastructure</p>
-                        <div class="playbook-actions">
-                            <button class="btn-execute" onclick="executePlaybook('block_ip')">Execute</button>
-                        </div>
-                    </div>
-                </div>
-                <div class="playbook-card">
-                    <div class="playbook-icon">🔒</div>
-                    <div class="playbook-info">
-                        <h4>Brute Force Response</h4>
-                        <p>Respond to authentication brute force attacks</p>
-                        <div class="playbook-actions">
-                            <button class="btn-execute" onclick="executePlaybook('brute_force_response')">Execute</button>
-                        </div>
-                    </div>
-                </div>
-                <div class="playbook-card">
-                    <div class="playbook-icon">🦠</div>
-                    <div class="playbook-info">
-                        <h4>Malware Containment</h4>
-                        <p>Isolate and contain malware infections</p>
-                        <div class="playbook-actions">
-                            <button class="btn-execute" onclick="executePlaybook('malware_containment')">Execute</button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="response-log">
-                <h3>Response History</h3>
-                <div class="log-container" id="responseLog">
-                    <div class="log-entry info">Ready to execute response playbooks...</div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Settings Page -->
-        <div id="settingsPage" class="page">
-            <div class="page-header">
-                <h2>⚙️ System Settings</h2>
-            </div>
-            <div class="settings-grid">
-                <div class="settings-card">
-                    <h3>Connection</h3>
-                    <div class="setting-item">
-                        <label>API Endpoint:</label>
-                        <input type="text" id="apiEndpoint" value="http://localhost:8080">
-                    </div>
-                    <div class="setting-item">
-                        <label>WebSocket URL:</label>
-                        <input type="text" id="wsEndpoint" value="ws://localhost:8080/ws">
-                    </div>
-                    <button id="reconnectBtn" class="btn-primary">Reconnect</button>
-                </div>
-                <div class="settings-card">
-                    <h3>Display</h3>
-                    <div class="setting-item">
-                        <label>Theme:</label>
-                        <select id="themeSelect">
-                            <option value="dark">Dark Matrix</option>
-                            <option value="light">Light</option>
-                        </select>
-                    </div>
-                    <div class="setting-item">
-                        <label>Refresh Interval:</label>
-                        <select id="refreshInterval">
-                            <option value="1">1 second</option>
-                            <option value="5">5 seconds</option>
-                            <option value="10">10 seconds</option>
-                        </select>
-                    </div>
-                </div>
-                <div class="settings-card">
-                    <h3>System Info</h3>
-                    <div class="info-item">
-                        <span class="info-label">Version:</span>
-                        <span class="info-value">1.0.0</span>
-                    </div>
-                    <div class="info-item">
-                        <span class="info-label">Build:</span>
-                        <span class="info-value">2024-01-15</span>
-                    </div>
-                </div>
-            </div>
-        </div>
+    <div class="sim-banner" id="simBanner" hidden>
+      <span>Simulated traffic is being generated. Alerts below include simulated attacks.</span>
+      <button class="link" data-goto="sources">Manage</button>
     </div>
 
-    <script src="js/websocket.js"></script>
-    <script src="js/charts.js"></script>
-    <script src="js/dashboard.js"></script>
-    <script src="js/alerts.js"></script>
-    <script src="js/events.js"></script>
-    <script src="js/intel.js"></script>
-    <script src="js/response.js"></script>
-    <script src="js/app.js"></script>
+    <main>
+      <!-- ----------------------------------------------- OVERVIEW -->
+      <section id="page-overview" class="page active">
+        <div class="kpis" id="kpis"></div>
+        <div class="grid g-3-2">
+          <div class="card"><div class="card-h"><h2>Alerts over time</h2><span class="hint">last 60 minutes, by severity</span></div><div class="chart"><canvas id="chartAlerts"></canvas></div></div>
+          <div class="card"><div class="card-h"><h2>Open alerts by severity</h2></div><div id="sevBars"></div>
+            <div class="card-h mt"><h2>Threat categories</h2></div><div id="catBars"></div></div>
+        </div>
+        <div class="grid g-3-2">
+          <div class="card"><div class="card-h"><h2>Event volume</h2><span class="hint">events per minute by source</span></div><div class="chart"><canvas id="chartVolume"></canvas></div></div>
+          <div class="card"><div class="card-h"><h2>Data sources</h2><button class="link" data-goto="sources">Details</button></div><div id="sourceList"></div></div>
+        </div>
+        <div class="grid g-3-2">
+          <div class="card"><div class="card-h"><h2>Latest alerts</h2><button class="link" data-goto="alerts">View all</button></div>
+            <table class="tbl"><thead><tr><th>Severity</th><th>Alert</th><th>Entity</th><th class="num">Events</th><th>Last seen</th><th>Status</th></tr></thead><tbody id="recentAlerts"></tbody></table></div>
+          <div class="card"><div class="card-h"><h2>Top alerting sources</h2></div>
+            <table class="tbl"><thead><tr><th>Source</th><th class="num">Alerts</th></tr></thead><tbody id="topSources"></tbody></table></div>
+        </div>
+      </section>
+
+      <!-- ----------------------------------------------- ALERTS -->
+      <section id="page-alerts" class="page">
+        <div class="card">
+          <div class="toolbar">
+            <select id="fSeverity"><option value="">All severities</option><option>critical</option><option>high</option><option>medium</option><option>low</option></select>
+            <select id="fStatus"><option value="">All statuses</option><option value="new">New</option><option value="investigating">Investigating</option><option value="contained">Contained</option><option value="resolved">Resolved</option><option value="false_positive">False positive</option></select>
+            <input id="fSearch" placeholder="Search IP, host, rule…">
+            <label class="check"><input type="checkbox" id="fOpen"> Open only</label>
+            <span class="spacer"></span>
+            <span class="hint" id="alertsCount"></span>
+            <button class="btn" id="fRefresh">Refresh</button>
+          </div>
+          <table class="tbl"><thead><tr><th>Priority</th><th>Severity</th><th>Alert</th><th>Detection</th><th>Entity</th><th class="num">Events</th><th class="num">Score</th><th>Last seen</th><th>Status</th></tr></thead>
+            <tbody id="alertsTable"></tbody></table>
+          <div class="pager"><button class="btn sm" id="prevPage">Previous</button><span id="pageInfo"></span><button class="btn sm" id="nextPage">Next</button></div>
+        </div>
+      </section>
+
+      <!-- ----------------------------------------------- INVESTIGATE -->
+      <section id="page-investigate" class="page">
+        <div class="card">
+          <form class="toolbar" id="entityForm">
+            <input id="entityInput" placeholder="IP address, host name or user name" class="grow">
+            <button class="btn primary">Investigate</button>
+          </form>
+          <div id="entityResult"><div class="empty-state">Search for an entity, or click any IP, host or user anywhere in the console.</div></div>
+        </div>
+      </section>
+
+      <!-- ----------------------------------------------- EVENTS -->
+      <section id="page-events" class="page">
+        <div class="card">
+          <div class="card-h"><h2>Live stream</h2><span class="hint" id="evRate"></span></div>
+          <div class="toolbar">
+            <button class="btn" id="evPause">Pause</button>
+            <button class="btn" id="evClear">Clear</button>
+            <input id="evFilter" placeholder="Filter (type, IP, host, process…)">
+            <label class="check"><input type="checkbox" id="evFlagged"> Flagged only</label>
+            <select id="evSource"><option value="">All sources</option><option value="host">This computer</option><option value="file">Log files</option><option value="upload">Imported</option><option value="api">API</option><option value="syslog">Syslog</option><option value="simulation">Simulation</option></select>
+          </div>
+          <div class="stream" id="eventStream"><div class="empty-state">Waiting for events…</div></div>
+        </div>
+        <div class="card">
+          <div class="card-h"><h2>Search stored events</h2></div>
+          <form class="toolbar" id="evSearchForm"><input id="evSearch" placeholder="Any text, e.g. an IP, a process name, ssh_failed" class="grow"><button class="btn primary">Search</button></form>
+          <table class="tbl"><thead><tr><th>Time</th><th>Source</th><th>Type</th><th>From</th><th>To</th><th>Details</th></tr></thead><tbody id="evResults"></tbody></table>
+        </div>
+      </section>
+
+      <!-- ----------------------------------------------- INTEL -->
+      <section id="page-intel" class="page">
+        <div class="kpis" id="intelKpis"></div>
+        <div class="grid g-1-1">
+          <div class="card">
+            <div class="card-h"><h2>Reputation lookup</h2></div>
+            <form class="toolbar" id="lookupForm"><input id="lookupValue" placeholder="IP, domain or file hash" class="grow"><button class="btn primary">Look up</button></form>
+            <div id="lookupResult" class="hint">Checks local threat intelligence, and AbuseIPDB / VirusTotal when their API keys are configured.</div>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>Add indicator</h2></div>
+            <form class="form" id="iocForm">
+              <input id="iocValue" placeholder="Value (IP, CIDR, domain, hash, URL)" required>
+              <div class="row"><select id="iocType"><option value="">Detect type automatically</option><option>ip</option><option>cidr</option><option>domain</option><option>hash</option><option>url</option></select>
+                <input id="iocDesc" placeholder="Description (optional)" class="grow"></div>
+              <div class="row"><button class="btn primary">Add indicator</button><span class="hint" id="iocMsg"></span></div>
+            </form>
+            <div class="card-h mt"><h2>Feeds</h2><button class="link" id="feedsRefresh">Refresh now</button></div>
+            <div id="feeds"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="toolbar"><input id="iocSearch" placeholder="Search indicators"><select id="iocFilterType"><option value="">All types</option><option>ip</option><option>cidr</option><option>domain</option><option>hash</option><option>url</option></select></div>
+          <table class="tbl"><thead><tr><th>Type</th><th>Indicator</th><th>Source</th><th class="num">Confidence</th><th>Description</th><th></th></tr></thead><tbody id="iocTable"></tbody></table>
+        </div>
+      </section>
+
+      <!-- ----------------------------------------------- RESPONSE -->
+      <section id="page-response" class="page">
+        <div class="notice" id="modeBanner"></div>
+        <div class="card">
+          <div class="card-h"><h2>Awaiting approval</h2></div>
+          <table class="tbl"><thead><tr><th>Requested</th><th>Playbook</th><th>Target</th><th>Alert</th><th>Requested by</th><th>Planned actions</th><th></th></tr></thead><tbody id="pendingTable"></tbody></table>
+        </div>
+        <div class="grid g-1-1">
+          <div class="card">
+            <div class="card-h"><h2>Run a playbook</h2></div>
+            <form class="form" id="pbForm">
+              <select id="pbSelect"></select>
+              <div class="row"><input id="pbIp" placeholder="IP address" class="grow"><input id="pbHost" placeholder="Host name" class="grow"><input id="pbUser" placeholder="User" class="grow"></div>
+              <div class="row"><button class="btn primary">Request</button><span class="hint" id="pbMsg"></span></div>
+            </form>
+            <div id="pbList"></div>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>Blocked IP addresses</h2></div>
+            <table class="tbl"><thead><tr><th>IP</th><th>Mode</th><th>Blocked</th><th>Expires</th><th></th></tr></thead><tbody id="blockedTable"></tbody></table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-h"><h2>History</h2></div>
+          <table class="tbl"><thead><tr><th>Updated</th><th>Playbook</th><th>Target</th><th>Status</th><th>Actions</th><th>Decided by</th></tr></thead><tbody id="historyTable"></tbody></table>
+        </div>
+      </section>
+
+      <!-- ----------------------------------------------- DETECTION -->
+      <section id="page-detection" class="page">
+        <div class="grid g-1-1">
+          <div class="card">
+            <div class="card-h"><h2>Anomaly model</h2></div>
+            <div id="mlStatus"></div>
+            <div class="row mt"><button class="btn" id="mlRetrainRecent">Retrain on my recent events</button><button class="btn" id="mlRetrainSim">Retrain on simulated traffic</button></div>
+            <div class="hint mt" id="mlMsg"></div>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>Attack-chain correlation</h2></div>
+            <table class="tbl"><thead><tr><th>Chain</th><th class="num">Fired</th><th class="num">Tracking</th></tr></thead><tbody id="chainTable"></tbody></table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-h"><h2>Detection rules</h2><span class="hint" id="ruleStats"></span><button class="link" id="rulesReload">Reload rule files</button></div>
+          <table class="tbl"><thead><tr><th>On</th><th>Rule</th><th>Type</th><th>Severity</th><th>Category</th><th>MITRE ATT&amp;CK</th><th class="num">Hits</th></tr></thead><tbody id="rulesTable"></tbody></table>
+        </div>
+      </section>
+
+      <!-- ----------------------------------------------- SOURCES -->
+      <section id="page-sources" class="page">
+        <div class="card">
+          <div class="card-h"><h2>Collectors</h2><span class="hint">events received in the last hour</span></div>
+          <div id="collectors" class="collectors"></div>
+        </div>
+        <div class="grid g-1-1">
+          <div class="card">
+            <div class="card-h"><h2>Import a log file</h2></div>
+            <p class="hint">Linux auth/syslog, Apache/Nginx access logs, firewall (UFW/iptables) logs, CEF or JSON lines. The file is analysed with every rule, threat intel and the attack chains; its own timestamps are kept.</p>
+            <div class="row mt"><input type="file" id="importFile" accept=".log,.txt,.jsonl,.json,.csv,.cef" multiple><button class="btn primary" id="importBtn">Import</button></div>
+            <div class="progress" hidden id="importProgress"><div></div></div>
+            <div class="hint mt" id="importMsg"></div>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>Send logs continuously</h2></div>
+            <div class="howto">
+              <b>Log files</b><p>Drop or append files in <code id="rawFolder">data/raw/</code> (<code>*.log</code>, <code>*.jsonl</code>). They are tailed live.</p>
+              <b>HTTP</b><pre><code id="curlSnippet"></code></pre>
+              <b>Syslog</b><p>Enable <code>syslog</code> in <code>config/ingestion.yaml</code>, then forward: <code>*.* @127.0.0.1:5514</code></p>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-h"><h2>Attack simulation</h2><span class="badge neutral">optional, for demos and testing</span></div>
+          <p class="hint">Generates traffic from a fictional company network and injects attacks, then measures whether the platform detects them. Simulated events are labelled <span class="src-tag">simulation</span> everywhere.</p>
+          <div class="toolbar mt">
+            <button class="btn" id="simToggle">Start simulation</button>
+            <label class="inline">Events/s <input id="simRate" type="number" min="0.5" max="200" step="0.5" value="5"></label>
+            <label class="inline">Attack every ~ <input id="simInterval" type="number" min="5" max="3600" value="45"> s</label>
+            <span class="spacer"></span>
+            <select id="simScenario"><option value="">Random attack</option></select>
+            <button class="btn" id="simInject">Inject attack</button>
+          </div>
+          <div class="kpis small" id="simScore"></div>
+          <table class="tbl"><thead><tr><th>Started</th><th>Scenario</th><th>Source</th><th>Result</th><th class="num">Time to detect</th></tr></thead><tbody id="simTable"></tbody></table>
+        </div>
+      </section>
+
+      <!-- ----------------------------------------------- SETTINGS -->
+      <section id="page-settings" class="page">
+        <div class="grid g-1-1">
+          <div class="card">
+            <div class="card-h"><h2>Connection</h2></div>
+            <form class="form" id="settingsForm">
+              <label>API key <span class="hint">(only if the server sets SOC_API_KEY)</span></label>
+              <input id="apiKey" type="password" autocomplete="off">
+              <label>Your name <span class="hint">(recorded in the audit log)</span></label>
+              <input id="analystName" placeholder="analyst">
+              <label>Theme</label>
+              <select id="themeSelect"><option value="auto">Match system</option><option value="light">Light</option><option value="dark">Dark</option></select>
+              <div class="row"><button class="btn primary">Save</button><span class="hint" id="settingsMsg"></span></div>
+            </form>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>System</h2></div>
+            <div id="systemInfo"></div>
+            <div class="card-h mt"><h2>Maintenance</h2></div>
+            <button class="btn danger" id="clearData">Delete all events, alerts and responses</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<!-- alert details -->
+<div class="drawer" id="drawer"><div class="drawer-panel"><button class="drawer-close" id="drawerClose" aria-label="Close">×</button><div id="drawerContent"></div></div></div>
+<div class="toast" id="toast"></div>
+<script src="js/app.js"></script>
 </body>
 </html>

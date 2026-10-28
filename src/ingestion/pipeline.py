@@ -1,164 +1,124 @@
 """
-Ingestion pipeline orchestrator.
-"""
+Ingestion pipeline: collectors -> queue -> normalizer -> detection handler.
 
+Fixes:
+  * every event's @timestamp was overwritten with the processing time
+  * collector failures (e.g. Kafka) cancelled the whole gather() and stopped
+    file ingestion too; each collector now runs as its own task
+  * events per second were never measured although the dashboard shows them
+"""
 import asyncio
-import json
-from typing import Dict, List, Optional, Any, Callable
-from datetime import datetime
+import time
+from collections import deque
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from src.core.logger import LoggerMixin
+from src.core.time_utils import iso
 from src.ingestion.collectors.file_collector import FileCollector
-from src.ingestion.collectors.syslog_collector import SyslogCollector
+from src.ingestion.collectors.host_collector import HostCollector
 from src.ingestion.collectors.kafka_collector import KafkaCollector
+from src.ingestion.collectors.syslog_collector import SyslogCollector
 from src.ingestion.parsers.normalizer import LogNormalizer
+
+Handler = Callable[[Dict[str, Any]], Awaitable[Any]]
 
 
 class IngestionPipeline(LoggerMixin):
-    """Orchestrates log ingestion from multiple sources."""
-
-    def __init__(self, config, event_handler: Callable = None):
-        super().__init__()
+    def __init__(self, config, event_handler: Optional[Handler] = None, queue_size: int = 20000):
         self.config = config
-        self.running = False
-        self.collectors: List[Any] = []
+        self.event_handler = event_handler
         self.normalizer = LogNormalizer(config)
-        self.queue = asyncio.Queue(maxsize=10000)
-        self.event_handler = event_handler  # Callback for detection engine
+        self.queue: asyncio.Queue = asyncio.Queue(maxsize=queue_size)
+        self.collectors: List[Any] = []
+        self.tasks: List[asyncio.Task] = []
+        self.running = False
+        self._recent = deque(maxlen=20000)  # processing times, for events/sec
+        self.stats = {"events_ingested": 0, "events_dropped": 0, "errors": 0, "last_event": None}
+
+        sources = (config.get("ingestion", {}) or {}).get("sources", {}) or {}
+        if (sources.get("file") or {}).get("enabled"):
+            self.collectors.append(FileCollector(config))
+        if (sources.get("syslog") or {}).get("enabled"):
+            self.collectors.append(SyslogCollector(config))
+        if (sources.get("kafka") or {}).get("enabled"):
+            self.collectors.append(KafkaCollector(config))
+        if (sources.get("host") or {}).get("enabled"):
+            self.collectors.append(HostCollector(config))
 
     async def start(self):
-        """Start the ingestion pipeline."""
-        self.logger.info("Starting ingestion pipeline...")
         self.running = True
+        for collector in self.collectors:
+            self.tasks.append(asyncio.create_task(self._run_collector(collector)))
+        self.tasks.append(asyncio.create_task(self._process_queue()))
+        self.logger.info(f"Ingestion started with {len(self.collectors)} collector(s)")
 
-        # Initialize collectors based on config
-        await self._init_collectors()
-
-        # Start collectors
-        collector_tasks = [collector.start(self.queue) for collector in self.collectors]
-
-        # Start processor
-        processor_task = asyncio.create_task(self._process_queue())
-
+    async def _run_collector(self, collector):
         try:
-            await asyncio.gather(*collector_tasks, processor_task)
+            await collector.start(self.queue)
         except asyncio.CancelledError:
-            self.logger.info("Ingestion pipeline cancelled")
+            pass
         except Exception as e:
-            self.logger.error(f"Error in ingestion pipeline: {e}", exc_info=True)
-            await self.stop()
+            self.logger.error(f"{collector.__class__.__name__} stopped: {e}", exc_info=True)
 
     async def stop(self):
-        """Stop the ingestion pipeline."""
-        self.logger.info("Stopping ingestion pipeline...")
         self.running = False
-
-        # Stop collectors
         for collector in self.collectors:
             await collector.stop()
-
-        # Clear queue
-        while not self.queue.empty():
-            try:
-                self.queue.get_nowait()
-                self.queue.task_done()
-            except asyncio.QueueEmpty:
-                break
-
-    async def _init_collectors(self):
-        """Initialize collectors based on configuration."""
-        ingestion_config = self.config.get("ingestion", {})
-
-        # File collector
-        if ingestion_config.get("sources", {}).get("file", {}).get("enabled", False):
-            file_collector = FileCollector(self.config)
-            self.collectors.append(file_collector)
-            self.logger.info("File collector initialized")
-
-        # Syslog collector
-        if ingestion_config.get("sources", {}).get("syslog", {}).get("enabled", False):
-            syslog_collector = SyslogCollector(self.config)
-            self.collectors.append(syslog_collector)
-            self.logger.info("Syslog collector initialized")
-
-        # Kafka collector
-        if ingestion_config.get("sources", {}).get("kafka", {}).get("enabled", False):
-            kafka_collector = KafkaCollector(self.config)
-            self.collectors.append(kafka_collector)
-            self.logger.info("Kafka collector initialized")
+        for task in self.tasks:
+            task.cancel()
+        await asyncio.gather(*self.tasks, return_exceptions=True)
+        self.tasks.clear()
 
     async def _process_queue(self):
-        """Process messages from the queue."""
-        self.logger.info("Starting queue processor")
-
         while self.running:
             try:
-                # Get message from queue with timeout
-                message = await asyncio.wait_for(self.queue.get(), timeout=1.0)
-
-                # Process message
-                await self._process_message(message)
-
-                # Mark task as done
-                self.queue.task_done()
-
+                raw = await asyncio.wait_for(self.queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
+            try:
+                await self.process(raw)
             except Exception as e:
-                self.logger.error(f"Error processing message: {e}", exc_info=True)
+                self.stats["errors"] += 1
+                self.logger.error(f"Failed to process event: {e}", exc_info=True)
 
-    async def _process_message(self, message: Dict[str, Any]):
-        """Process a single message."""
+    async def process(self, raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Normalize one raw event and hand it to detection. Returns the normalized event."""
+        event = self.normalizer.normalize_sync(raw)
+        if not event:
+            return None
+        event["ingested_at"] = iso()
+        self.stats["events_ingested"] += 1
+        self.stats["last_event"] = event["ingested_at"]
+        self._recent.append(time.monotonic())
+        if self.event_handler:
+            await self.event_handler(event)
+        return event
+
+    def submit(self, raw: Dict[str, Any]) -> bool:
+        """Queue an event without waiting (simulator, high-volume API)."""
         try:
-            # Normalize message
-            normalized = await self.normalizer.normalize(message)
+            self.queue.put_nowait(raw)
+            return True
+        except asyncio.QueueFull:
+            self.stats["events_dropped"] += 1
+            return False
 
-            if normalized:
-                # Add metadata
-                normalized["@timestamp"] = datetime.utcnow().isoformat() + "Z"
-                normalized["ingestion_timestamp"] = datetime.utcnow().isoformat()
+    # old name used by the API
+    async def ingest_raw(self, raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        return await self.process(raw)
 
-                # Forward to detection engine via event handler
-                if self.event_handler:
-                    await self.event_handler(normalized)
-
-                self.logger.debug(f"Processed message: {normalized.get('event_type', 'unknown')}")
-
-        except Exception as e:
-            self.logger.error(f"Error normalizing message: {e}", exc_info=True)
-
-    async def ingest_raw(self, raw_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """
-        Ingest raw data directly (for API/testing).
-
-        Args:
-            raw_data: Raw log data
-
-        Returns:
-            Normalized event or None
-        """
-        try:
-            normalized = await self.normalizer.normalize(raw_data)
-            if normalized:
-                normalized["@timestamp"] = datetime.utcnow().isoformat() + "Z"
-                # Forward to detection engine
-                if self.event_handler:
-                    await self.event_handler(normalized)
-                return normalized
-        except Exception as e:
-            self.logger.error(f"Error ingesting raw data: {e}", exc_info=True)
-
-        return None
+    def events_per_second(self, window: float = 10.0) -> float:
+        cutoff = time.monotonic() - window
+        return round(sum(1 for t in self._recent if t >= cutoff) / window, 2)
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get ingestion statistics."""
         return {
             "running": self.running,
-            "collectors": len(self.collectors),
             "queue_size": self.queue.qsize(),
-            "collector_stats": [
-                collector.get_stats() for collector in self.collectors
-            ],
+            "events_per_second": self.events_per_second(),
+            **self.stats,
+            "parser": self.normalizer.get_stats(),
+            "collectors": [c.get_stats() for c in self.collectors],
         }

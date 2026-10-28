@@ -1,168 +1,94 @@
 """
-Syslog collector using asyncio.
-"""
+Syslog collector (UDP and/or TCP).
 
+Rewritten with asyncio's DatagramProtocol: the old loop used
+loop.sock_recvfrom on a raw socket, which isn't available on Windows'
+default event loop before Python 3.11, and it stamped events with the
+event-loop clock (seconds since boot) instead of a real time.
+
+Default port is 5514 so it runs without root/admin; point devices at it or
+forward from rsyslog (e.g. `*.* @127.0.0.1:5514`).
+"""
 import asyncio
-import socket
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 from src.core.logger import LoggerMixin
+from src.core.time_utils import iso
+
+
+class _UDPProtocol(asyncio.DatagramProtocol):
+    def __init__(self, collector: "SyslogCollector", queue: asyncio.Queue):
+        self.collector = collector
+        self.queue = queue
+
+    def datagram_received(self, data: bytes, addr):
+        self.collector.enqueue(data, addr, self.queue)
 
 
 class SyslogCollector(LoggerMixin):
-    """Collects logs via Syslog protocol."""
-
     def __init__(self, config):
-        super().__init__()
-        self.config = config
+        cfg = ((config.get("ingestion", {}) or {}).get("sources", {}) or {}).get("syslog", {}) or {}
+        self.host = cfg.get("host", "127.0.0.1")
+        self.port = int(cfg.get("port", 5514))
+        self.protocol = str(cfg.get("protocol", "udp")).lower()
         self.running = False
-        self.server: Optional[asyncio.Server] = None
-        self.stats = {
-            "messages_received": 0,
-            "connections": 0,
-            "last_received": None,
-            "errors": 0,
-        }
+        self.transport: Optional[asyncio.BaseTransport] = None
+        self.server: Optional[asyncio.AbstractServer] = None
+        self.stats = {"messages_received": 0, "last_received": None, "errors": 0, "dropped": 0}
+
+    def enqueue(self, data: bytes, addr, queue: asyncio.Queue):
+        for line in data.decode("utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                queue.put_nowait({"raw_message": line, "source_type": "syslog",
+                                  "source_address": f"{addr[0]}:{addr[1]}" if addr else None})
+                self.stats["messages_received"] += 1
+                self.stats["last_received"] = iso()
+            except asyncio.QueueFull:
+                self.stats["dropped"] += 1
 
     async def start(self, queue: asyncio.Queue):
-        """Start Syslog server."""
-        self.logger.info("Starting Syslog collector...")
-
-        config = self.config.get("ingestion", {}).get("sources", {}).get("syslog", {})
-        host = config.get("host", "0.0.0.0")
-        port = config.get("port", 514)
-        protocol = config.get("protocol", "udp").lower()
-        backlog = config.get("backlog", 100)
-
+        loop = asyncio.get_running_loop()
         self.running = True
-
         try:
-            if protocol == "udp":
-                await self._start_udp_server(host, port, queue)
-            elif protocol == "tcp":
-                await self._start_tcp_server(host, port, backlog, queue)
-            else:
-                raise ValueError(f"Unsupported protocol: {protocol}")
-
-        except Exception as e:
-            self.logger.error(f"Failed to start Syslog server: {e}", exc_info=True)
-            await self.stop()
-
-    async def stop(self):
-        """Stop Syslog server."""
-        self.logger.info("Stopping Syslog collector...")
-        self.running = False
-
-        if self.server:
-            self.server.close()
-            await self.server.wait_closed()
-
-    async def _start_udp_server(self, host: str, port: int, queue: asyncio.Queue):
-        """Start UDP Syslog server."""
-        self.logger.info(f"Starting UDP Syslog server on {host}:{port}")
-
-        loop = asyncio.get_event_loop()
-
-        # Create UDP socket
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((host, port))
-
+            if self.protocol in ("udp", "both"):
+                self.transport, _ = await loop.create_datagram_endpoint(
+                    lambda: _UDPProtocol(self, queue), local_addr=(self.host, self.port))
+                self.logger.info(f"Syslog UDP listening on {self.host}:{self.port}")
+            if self.protocol in ("tcp", "both"):
+                self.server = await asyncio.start_server(
+                    lambda r, w: self._tcp_client(r, w, queue), self.host, self.port)
+                self.logger.info(f"Syslog TCP listening on {self.host}:{self.port}")
+        except OSError as e:
+            self.stats["errors"] += 1
+            self.logger.error(f"Syslog collector could not bind {self.host}:{self.port}: {e}")
+            self.running = False
+            return
         while self.running:
-            try:
-                data, addr = await loop.sock_recvfrom(sock, 65536)
-                await self._process_datagram(data, addr, queue)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self.logger.error(f"Error receiving UDP data: {e}", exc_info=True)
-                self.stats["errors"] += 1
+            await asyncio.sleep(1)
 
-        sock.close()
-
-    async def _start_tcp_server(
-        self, host: str, port: int, backlog: int, queue: asyncio.Queue
-    ):
-        """Start TCP Syslog server."""
-        self.logger.info(f"Starting TCP Syslog server on {host}:{port}")
-
-        self.server = await asyncio.start_server(
-            lambda r, w: self._handle_tcp_client(r, w, queue),
-            host,
-            port,
-            backlog=backlog,
-        )
-
-        async with self.server:
-            await self.server.serve_forever()
-
-    async def _handle_tcp_client(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, queue: asyncio.Queue
-    ):
-        """Handle TCP client connection."""
+    async def _tcp_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, queue):
         addr = writer.get_extra_info("peername")
-        self.logger.debug(f"New TCP connection from {addr}")
-        self.stats["connections"] += 1
-
         try:
             while self.running:
-                try:
-                    data = await asyncio.wait_for(reader.read(65536), timeout=30.0)
-                    if not data:
-                        break
-
-                    await self._process_datagram(data, addr, queue)
-
-                except asyncio.TimeoutError:
-                    self.logger.debug(f"Connection timeout from {addr}")
+                line = await reader.readline()
+                if not line:
                     break
-                except asyncio.CancelledError:
-                    break
-                except Exception as e:
-                    self.logger.error(f"Error processing TCP data: {e}", exc_info=True)
-                    self.stats["errors"] += 1
-                    break
-
+                self.enqueue(line, addr, queue)
+        except (ConnectionError, asyncio.IncompleteReadError):
+            pass
         finally:
             writer.close()
-            try:
-                await writer.wait_closed()
-            except:
-                pass
 
-            self.logger.debug(f"TCP connection closed from {addr}")
-
-    async def _process_datagram(self, data: bytes, addr: tuple, queue: asyncio.Queue):
-        """Process a Syslog datagram."""
-        try:
-            message = data.decode("utf-8", errors="replace").strip()
-
-            if message:
-                # Create log event
-                event = {
-                    "raw_message": message,
-                    "source_type": "syslog",
-                    "source_address": f"{addr[0]}:{addr[1]}",
-                    "@timestamp": asyncio.get_event_loop().time(),
-                }
-
-                # Put in queue
-                await queue.put(event)
-
-                # Update stats
-                self.stats["messages_received"] += 1
-                self.stats["last_received"] = asyncio.get_event_loop().time()
-
-                self.logger.debug(f"Received Syslog message from {addr}: {message[:100]}...")
-
-        except Exception as e:
-            self.logger.error(f"Error processing Syslog datagram: {e}", exc_info=True)
-            self.stats["errors"] += 1
+    async def stop(self):
+        self.running = False
+        if self.transport:
+            self.transport.close()
+        if self.server:
+            self.server.close()
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get collector statistics."""
-        return {
-            "type": "syslog",
-            "running": self.running,
-            **self.stats,
-        }
+        return {"type": "syslog", "running": self.running, "listen": f"{self.protocol}://{self.host}:{self.port}",
+                **self.stats}

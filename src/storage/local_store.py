@@ -1,337 +1,371 @@
 """
-Local file-based storage for events and alerts.
+SQLite persistence for events, alerts, response actions, blocked IPs and
+analyst-added IOCs.
+
+Before this, alerts lived in a Python list (gone on restart, capped at 1000),
+/api/v1/events always returned [], and changing an alert's status was only
+broadcast over the WebSocket, never saved. SQLite needs no server, so it
+works the same in the desktop app, Docker and tests.
+"""
+import json
+import sqlite3
+import threading
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Union
+
+from src.core.logger import LoggerMixin
+from src.core.paths import writable
+from src.core.time_utils import iso, utcnow
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS events (
+    id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    event_type TEXT,
+    src_ip TEXT,
+    dst_ip TEXT,
+    user TEXT,
+    hostname TEXT,
+    source_type TEXT,
+    flagged INTEGER DEFAULT 0,
+    ingested TEXT,
+    data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+CREATE INDEX IF NOT EXISTS idx_events_src ON events(src_ip);
+CREATE INDEX IF NOT EXISTS idx_events_dst ON events(dst_ip);
+CREATE INDEX IF NOT EXISTS idx_events_host ON events(hostname);
+
+CREATE TABLE IF NOT EXISTS alerts (
+    id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    severity TEXT,
+    status TEXT,
+    score REAL,
+    rule_id TEXT,
+    category TEXT,
+    src_ip TEXT,
+    data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at);
+CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status);
+
+CREATE TABLE IF NOT EXISTS responses (
+    id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    playbook TEXT,
+    alert_id TEXT,
+    status TEXT,
+    data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_responses_status ON responses(status);
+
+CREATE TABLE IF NOT EXISTS blocked_ips (
+    ip TEXT PRIMARY KEY,
+    blocked_at TEXT NOT NULL,
+    expires_at TEXT,
+    mode TEXT,
+    reason TEXT,
+    alert_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS iocs (
+    type TEXT NOT NULL,
+    value TEXT NOT NULL,
+    source TEXT,
+    confidence REAL,
+    description TEXT,
+    added_at TEXT,
+    PRIMARY KEY (type, value)
+);
 """
 
-import json
-import pickle
-import gzip
-from typing import Dict, List, Any, Optional
-from datetime import datetime, timedelta
-from pathlib import Path
-
-from src.utils.logger import LoggerMixin
-
-
-class LocalStorage(LoggerMixin):
-    """Local file-based storage for SOC data."""
-
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.base_path = Path(config.get("storage", {}).get("local_path", "./data"))
-        self.compression = config.get("storage", {}).get("compression", True)
-
-        # Ensure directories exist
-        self._ensure_directories()
-
-    def _ensure_directories(self):
-        """Ensure storage directories exist."""
-        directories = [
-            self.base_path / "raw",
-            self.base_path / "processed",
-            self.base_path / "alerts",
-            self.base_path / "models",
-            self.base_path / "intel",
-        ]
-
-        for directory in directories:
-            directory.mkdir(parents=True, exist_ok=True)
-
-    def save_event(self, event: Dict[str, Any], event_type: str = "raw"):
-        """
-        Save event to local storage.
-
-        Args:
-            event: Event data
-            event_type: Type of event (raw, processed, alert)
-        """
-        try:
-            timestamp = event.get("@timestamp", datetime.utcnow().isoformat())
-            date_part = timestamp.split("T")[0]  # YYYY-MM-DD
-
-            # Create filename
-            filename = f"{event_type}_{date_part}.jsonl"
-            if self.compression:
-                filename += ".gz"
-
-            filepath = self.base_path / event_type / filename
-
-            # Write event
-            self._append_to_file(filepath, event)
-
-        except Exception as e:
-            self.logger.error(f"Error saving event: {e}", exc_info=True)
-
-    def save_events_batch(self, events: List[Dict[str, Any]], event_type: str = "raw"):
-        """Save batch of events."""
-        for event in events:
-            self.save_event(event, event_type)
-
-    def load_events(
-        self,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
-        event_type: str = "raw",
-        limit: int = 1000,
-    ) -> List[Dict[str, Any]]:
-        """
-        Load events from storage.
-
-        Args:
-            start_time: Start time filter
-            end_time: End time filter
-            event_type: Type of events to load
-            limit: Maximum number of events to return
-
-        Returns:
-            List of events
-        """
-        events = []
-        directory = self.base_path / event_type
-
-        if not directory.exists():
-            return []
-
-        # Get relevant files
-        files = self._get_relevant_files(directory, start_time, end_time)
-
-        # Read files
-        for filepath in files:
-            file_events = self._read_file(filepath, start_time, end_time, limit - len(events))
-            events.extend(file_events)
-
-            if len(events) >= limit:
-                break
-
-        return events[:limit]
-
-    def save_alert(self, alert: Dict[str, Any]):
-        """Save alert to storage."""
-        self.save_event(alert, "alerts")
-
-    def load_alerts(
-        self,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
-        severity: Optional[str] = None,
-        limit: int = 1000,
-    ) -> List[Dict[str, Any]]:
-        """Load alerts from storage."""
-        alerts = self.load_events(start_time, end_time, "alerts", limit)
-
-        if severity:
-            alerts = [a for a in alerts if a.get("severity") == severity]
-
-        return alerts
-
-    def save_model(self, model: Any, model_name: str, version: str = "latest"):
-        """Save ML model to storage."""
-        try:
-            model_dir = self.base_path / "models" / model_name
-            model_dir.mkdir(parents=True, exist_ok=True)
-
-            filepath = model_dir / f"{version}.pkl.gz"
-
-            with gzip.open(filepath, "wb") as f:
-                pickle.dump(model, f)
-
-            self.logger.info(f"Model saved: {model_name}/{version}")
-
-        except Exception as e:
-            self.logger.error(f"Error saving model: {e}", exc_info=True)
-
-    def load_model(self, model_name: str, version: str = "latest") -> Optional[Any]:
-        """Load ML model from storage."""
-        try:
-            filepath = self.base_path / "models" / model_name / f"{version}.pkl.gz"
-
-            if not filepath.exists():
-                return None
-
-            with gzip.open(filepath, "rb") as f:
-                model = pickle.load(f)
-
-            self.logger.info(f"Model loaded: {model_name}/{version}")
-            return model
-
-        except Exception as e:
-            self.logger.error(f"Error loading model: {e}", exc_info=True)
-            return None
-
-    def save_intel(self, iocs: List[Dict[str, Any]], feed_name: str):
-        """Save threat intelligence data."""
-        try:
-            intel_dir = self.base_path / "intel"
-            intel_dir.mkdir(parents=True, exist_ok=True)
-
-            filepath = intel_dir / f"{feed_name}.json"
-
-            data = {
-                "feed_name": feed_name,
-                "timestamp": datetime.utcnow().isoformat(),
-                "iocs": iocs,
-            }
-
-            with open(filepath, "w") as f:
-                json.dump(data, f, indent=2)
-
-        except Exception as e:
-            self.logger.error(f"Error saving intel: {e}", exc_info=True)
-
-    def load_intel(self, feed_name: str) -> Optional[List[Dict[str, Any]]]:
-        """Load threat intelligence data."""
-        try:
-            filepath = self.base_path / "intel" / f"{feed_name}.json"
-
-            if not filepath.exists():
-                return None
-
-            with open(filepath, "r") as f:
-                data = json.load(f)
-
-            return data.get("iocs", [])
-
-        except Exception as e:
-            self.logger.error(f"Error loading intel: {e}", exc_info=True)
-            return None
-
-    def cleanup_old_data(self, retention_days: int = 30):
-        """Clean up old data files."""
-        retention_date = datetime.utcnow() - timedelta(days=retention_days)
-
-        for event_type in ["raw", "processed", "alerts"]:
-            directory = self.base_path / event_type
-
-            if not directory.exists():
-                continue
-
-            for filepath in directory.iterdir():
-                if filepath.is_file():
-                    # Extract date from filename
-                    try:
-                        date_str = filepath.name.split("_")[1].split(".")[0]
-                        file_date = datetime.strptime(date_str, "%Y-%m-%d")
-
-                        if file_date < retention_date:
-                            filepath.unlink()
-                            self.logger.debug(f"Deleted old file: {filepath}")
-
-                    except (ValueError, IndexError):
-                        # Could not parse date, skip
-                        pass
-
-    def _append_to_file(self, filepath: Path, data: Dict[str, Any]):
-        """Append data to file (JSONL format)."""
-        line = json.dumps(data) + "\n"
-
-        if self.compression and str(filepath).endswith(".gz"):
-            with gzip.open(filepath, "at", encoding="utf-8") as f:
-                f.write(line)
-        else:
-            with open(filepath, "a", encoding="utf-8") as f:
-                f.write(line)
-
-    def _get_relevant_files(
-        self,
-        directory: Path,
-        start_time: Optional[datetime],
-        end_time: Optional[datetime],
-    ) -> List[Path]:
-        """Get files relevant to time range."""
-        files = []
-
-        for filepath in directory.iterdir():
-            if filepath.is_file():
-                # Extract date from filename
-                try:
-                    date_str = filepath.name.split("_")[1].split(".")[0]
-                    file_date = datetime.strptime(date_str, "%Y-%m-%d")
-
-                    # Check if file is in time range
-                    if start_time and file_date.date() < start_time.date():
-                        continue
-                    if end_time and file_date.date() > end_time.date():
-                        continue
-
-                    files.append(filepath)
-
-                except (ValueError, IndexError):
-                    # Could not parse date, include file
-                    files.append(filepath)
-
-        # Sort by modification time (newest first)
-        files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-
-        return files
-
-    def _read_file(
-        self,
-        filepath: Path,
-        start_time: Optional[datetime],
-        end_time: Optional[datetime],
-        limit: int,
-    ) -> List[Dict[str, Any]]:
-        """Read events from file."""
-        events = []
-
-        try:
-            # Open file (compressed or regular)
-            if str(filepath).endswith(".gz"):
-                open_func = gzip.open
-                mode = "rt"
-            else:
-                open_func = open
-                mode = "r"
-
-            with open_func(filepath, mode, encoding="utf-8") as f:
-                for line in f:
-                    if not line.strip():
-                        continue
-
-                    try:
-                        event = json.loads(line)
-
-                        # Filter by time
-                        event_time_str = event.get("@timestamp", "")
-                        if event_time_str:
-                            event_time = datetime.fromisoformat(
-                                event_time_str.replace("Z", "+00:00")
-                            )
-
-                            if start_time and event_time < start_time:
-                                continue
-                            if end_time and event_time > end_time:
-                                continue
-
-                        events.append(event)
-
-                        if len(events) >= limit:
-                            break
-
-                    except json.JSONDecodeError:
-                        self.logger.warning(f"Invalid JSON in file: {filepath}")
-
-        except Exception as e:
-            self.logger.error(f"Error reading file {filepath}: {e}", exc_info=True)
-
-        return events
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Get storage statistics."""
-        stats = {
-            "base_path": str(self.base_path),
-            "compression": self.compression,
-            "directories": {},
+ALERT_STATUSES = ("new", "investigating", "contained", "resolved", "false_positive")
+
+
+class SOCStore(LoggerMixin):
+    def __init__(self, path: Union[str, Path, None] = None, max_events: int = 50000):
+        self.path = Path(path) if path else writable("data/soc.db")
+        if str(self.path) != ":memory:":
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.max_events = max_events
+        self._lock = threading.RLock()
+        self.conn = sqlite3.connect(str(self.path), check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        if str(self.path) != ":memory:":
+            self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.executescript(SCHEMA.replace(
+            "CREATE INDEX IF NOT EXISTS idx_events_host ON events(hostname);", ""))
+        columns = {r[1] for r in self.conn.execute("PRAGMA table_info(events)")}
+        if "ingested" not in columns:  # databases created by an earlier v2 build
+            self.conn.execute("ALTER TABLE events ADD COLUMN ingested TEXT")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_events_host ON events(hostname)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ingested ON events(ingested)")
+        self.conn.commit()
+        self._inserts = 0
+
+    # ------------------------------------------------------------- events
+    def add_events(self, events: Iterable[Dict[str, Any]]):
+        rows = [(
+            e["event_id"], e.get("@timestamp") or iso(), e.get("event_type"), e.get("src_ip"), e.get("dst_ip"),
+            e.get("user"), e.get("hostname"), e.get("source_type"), int(bool(e.get("_flagged"))),
+            e.get("ingested_at") or iso(),
+            json.dumps({k: v for k, v in e.items() if not k.startswith("_")}, default=str),
+        ) for e in events]
+        if not rows:
+            return
+        with self._lock:
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO events (id, ts, event_type, src_ip, dst_ip, user, hostname, source_type,"
+                " flagged, ingested, data) VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
+            self.conn.commit()
+            self._inserts += len(rows)
+            if self._inserts >= 1000:  # prune occasionally, not on every insert
+                self._inserts = 0
+                self.conn.execute(
+                    "DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY ingested DESC LIMIT -1 OFFSET ?)",
+                    (self.max_events,))
+                self.conn.commit()
+
+    def mark_flagged(self, event_ids: Iterable[str]):
+        ids = list(event_ids)
+        if not ids:
+            return
+        with self._lock:
+            self.conn.executemany("UPDATE events SET flagged = 1 WHERE id = ?", [(i,) for i in ids])
+            self.conn.commit()
+
+    def recent_events(self, limit: int = 100, event_type: Optional[str] = None, ip: Optional[str] = None,
+                      search: Optional[str] = None, flagged_only: bool = False) -> List[Dict[str, Any]]:
+        where, args = [], []
+        if event_type:
+            where.append("event_type = ?")
+            args.append(event_type)
+        if ip:
+            where.append("(src_ip = ? OR dst_ip = ?)")
+            args += [ip, ip]
+        if search:
+            where.append("data LIKE ?")
+            args.append(f"%{search}%")
+        if flagged_only:
+            where.append("flagged = 1")
+        sql = "SELECT data, flagged FROM events"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY ts DESC LIMIT ?"
+        with self._lock:
+            rows = self.conn.execute(sql, (*args, limit)).fetchall()
+        return [{**json.loads(r["data"]), "flagged": bool(r["flagged"])} for r in rows]
+
+    def event_counts(self, since: str, by: str = "event_type") -> Dict[str, int]:
+        """Events received since `since` (ingestion time, so imported old logs count too)."""
+        column = {"event_type": "event_type", "source": "source_type"}[by]
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT {column}, COUNT(*) FROM events WHERE ingested >= ? GROUP BY {column}", (since,)).fetchall()
+        return {r[0] or "unknown": r[1] for r in rows}
+
+    def event_volume(self, since: str) -> List[Dict[str, Any]]:
+        """Events per minute by source since `since`."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT substr(ingested, 1, 16) m, source_type, COUNT(*) FROM events WHERE ingested >= ?"
+                " GROUP BY m, source_type ORDER BY m", (since,)).fetchall()
+        out: Dict[str, Dict[str, Any]] = {}
+        for minute, source, count in rows:
+            out.setdefault(minute, {"minute": minute})[source or "unknown"] = count
+        return list(out.values())
+
+    def entity(self, value: str, limit: int = 200) -> Dict[str, Any]:
+        """Everything known about one IP, host name or user."""
+        with self._lock:
+            events = self.conn.execute(
+                "SELECT data, flagged FROM events WHERE src_ip = ? OR dst_ip = ? OR hostname = ? OR user = ?"
+                " ORDER BY ts DESC LIMIT ?", (value, value, value, value, limit)).fetchall()
+            totals = self.conn.execute(
+                "SELECT COUNT(*), MIN(ts), MAX(ts), SUM(flagged) FROM events WHERE src_ip = ? OR dst_ip = ?"
+                " OR hostname = ? OR user = ?", (value, value, value, value)).fetchone()
+            by_type = self.conn.execute(
+                "SELECT event_type, COUNT(*) FROM events WHERE src_ip = ? OR dst_ip = ? OR hostname = ? OR user = ?"
+                " GROUP BY event_type ORDER BY 2 DESC", (value, value, value, value)).fetchall()
+            alerts = self.conn.execute(
+                "SELECT data FROM alerts WHERE src_ip = ? OR data LIKE ? ORDER BY updated_at DESC LIMIT 100",
+                (value, f'%"{value}"%')).fetchall()
+        parsed = [{**json.loads(r["data"]), "flagged": bool(r["flagged"])} for r in events]
+        peers: Dict[str, int] = {}
+        for e in parsed:
+            for field in ("src_ip", "dst_ip"):
+                other = e.get(field)
+                if other and other != value:
+                    peers[other] = peers.get(other, 0) + 1
+        return {
+            "value": value, "events_total": totals[0] or 0, "first_seen": totals[1], "last_seen": totals[2],
+            "flagged_events": int(totals[3] or 0), "by_type": {r[0]: r[1] for r in by_type},
+            "alerts": [json.loads(r["data"]) for r in alerts],
+            "top_peers": sorted(({"ip": k, "events": v} for k, v in peers.items()), key=lambda x: -x["events"])[:10],
+            "events": parsed,
         }
 
-        for event_type in ["raw", "processed", "alerts", "models", "intel"]:
-            directory = self.base_path / event_type
+    def count_events(self) -> int:
+        with self._lock:
+            return self.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
 
-            if directory.exists():
-                files = list(directory.iterdir())
-                stats["directories"][event_type] = {
-                    "file_count": len(files),
-                    "files": [f.name for f in files[:10]],  # First 10 files
-                }
+    # ------------------------------------------------------------- alerts
+    def save_alert(self, alert: Dict[str, Any]):
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO alerts (id, created_at, updated_at, severity, status, score, rule_id,"
+                " category, src_ip, data) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (alert["id"], alert["created_at"], alert.get("updated_at", alert["created_at"]), alert.get("severity"),
+                 alert.get("status", "new"), alert.get("score", 0), alert.get("rule_id"), alert.get("category"),
+                 (alert.get("entity") or {}).get("src_ip"), json.dumps(alert, default=str)))
+            self.conn.commit()
 
-        return stats
+    def get_alert(self, alert_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self.conn.execute("SELECT data FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+        return json.loads(row["data"]) if row else None
+
+    def list_alerts(self, limit: int = 100, offset: int = 0, severity: Optional[str] = None,
+                    status: Optional[str] = None, search: Optional[str] = None,
+                    open_only: bool = False) -> Dict[str, Any]:
+        where, args = [], []
+        if severity:
+            where.append("severity = ?")
+            args.append(severity)
+        if status:
+            where.append("status = ?")
+            args.append(status)
+        if open_only:
+            where.append("status IN ('new', 'investigating')")
+        if search:
+            where.append("data LIKE ?")
+            args.append(f"%{search}%")
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        with self._lock:
+            total = self.conn.execute(f"SELECT COUNT(*) FROM alerts{clause}", args).fetchone()[0]
+            rows = self.conn.execute(
+                f"SELECT data FROM alerts{clause} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                (*args, limit, offset)).fetchall()
+        return {"alerts": [json.loads(r["data"]) for r in rows], "total": total}
+
+    def alert_stats(self) -> Dict[str, Any]:
+        with self._lock:
+            by_sev = dict(self.conn.execute(
+                "SELECT severity, COUNT(*) FROM alerts WHERE status IN ('new','investigating') GROUP BY severity"
+            ).fetchall())
+            by_status = dict(self.conn.execute("SELECT status, COUNT(*) FROM alerts GROUP BY status").fetchall())
+            total = self.conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
+            top = self.conn.execute(
+                "SELECT src_ip, COUNT(*) c FROM alerts WHERE src_ip IS NOT NULL GROUP BY src_ip ORDER BY c DESC LIMIT 8"
+            ).fetchall()
+            cats = dict(self.conn.execute("SELECT category, COUNT(*) FROM alerts GROUP BY category").fetchall())
+        return {
+            "total": total,
+            "open": by_status.get("new", 0) + by_status.get("investigating", 0),
+            "open_by_severity": by_sev,
+            "by_status": by_status,
+            "by_category": cats,
+            "top_sources": [{"ip": r[0], "alerts": r[1]} for r in top],
+        }
+
+    def alert_timeline(self, since: str) -> List[Dict[str, Any]]:
+        """Alerts per minute (by creation) since `since`."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT substr(created_at, 1, 16) m, severity, COUNT(*) FROM alerts WHERE created_at >= ?"
+                " GROUP BY m, severity ORDER BY m", (since,)).fetchall()
+        out: Dict[str, Dict[str, Any]] = {}
+        for minute, severity, count in rows:
+            out.setdefault(minute, {"minute": minute, "total": 0})
+            out[minute][severity] = count
+            out[minute]["total"] += count
+        return list(out.values())
+
+    # ------------------------------------------------------------- responses
+    def save_response(self, item: Dict[str, Any]):
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO responses (id, created_at, updated_at, playbook, alert_id, status, data)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (item["id"], item["created_at"], item.get("updated_at", item["created_at"]), item.get("playbook"),
+                 item.get("alert_id"), item.get("status"), json.dumps(item, default=str)))
+            self.conn.commit()
+
+    def get_response(self, response_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self.conn.execute("SELECT data FROM responses WHERE id = ?", (response_id,)).fetchone()
+        return json.loads(row["data"]) if row else None
+
+    def list_responses(self, status: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        sql, args = "SELECT data FROM responses", []
+        if status:
+            sql += " WHERE status = ?"
+            args.append(status)
+        sql += " ORDER BY updated_at DESC LIMIT ?"
+        with self._lock:
+            rows = self.conn.execute(sql, (*args, limit)).fetchall()
+        return [json.loads(r["data"]) for r in rows]
+
+    # ------------------------------------------------------------- blocked IPs
+    def add_block(self, ip: str, mode: str, reason: str, alert_id: Optional[str], expires_at: Optional[str]):
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO blocked_ips (ip, blocked_at, expires_at, mode, reason, alert_id)"
+                " VALUES (?,?,?,?,?,?)", (ip, iso(), expires_at, mode, reason, alert_id))
+            self.conn.commit()
+
+    def remove_block(self, ip: str) -> bool:
+        with self._lock:
+            cur = self.conn.execute("DELETE FROM blocked_ips WHERE ip = ?", (ip,))
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def list_blocks(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute("SELECT * FROM blocked_ips ORDER BY blocked_at DESC").fetchall()
+        return [dict(r) for r in rows]
+
+    def expired_blocks(self) -> List[str]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT ip FROM blocked_ips WHERE expires_at IS NOT NULL AND expires_at < ?", (iso(),)).fetchall()
+        return [r[0] for r in rows]
+
+    # ------------------------------------------------------------- IOCs
+    def add_ioc(self, ioc_type: str, value: str, source: str, confidence: float, description: str = ""):
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO iocs (type, value, source, confidence, description, added_at)"
+                " VALUES (?,?,?,?,?,?)", (ioc_type, value, source, confidence, description, iso()))
+            self.conn.commit()
+
+    def remove_ioc(self, ioc_type: str, value: str) -> bool:
+        with self._lock:
+            cur = self.conn.execute("DELETE FROM iocs WHERE type = ? AND value = ?", (ioc_type, value))
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def list_iocs(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute("SELECT * FROM iocs ORDER BY added_at DESC").fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------- admin
+    def reset(self):
+        """Delete all events, alerts and responses (blocked IPs and IOCs are kept)."""
+        with self._lock:
+            for table in ("events", "alerts", "responses"):
+                self.conn.execute(f"DELETE FROM {table}")
+            self.conn.commit()
+
+    def close(self):
+        with self._lock:
+            self.conn.close()
+
+
+def since_minutes(minutes: int) -> str:
+    from datetime import timedelta
+    return iso(utcnow() - timedelta(minutes=minutes))

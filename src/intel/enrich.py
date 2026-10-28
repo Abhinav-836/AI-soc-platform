@@ -1,49 +1,44 @@
-import requests
-from typing import Dict, Any, Optional
+"""
+Event enrichment: adds context analysts and rules can use.
+
+  src_scope / dst_scope   internal | external
+  direction               inbound | outbound | internal | external
+  asset                   name/criticality of a known asset (config: detection.assets)
+  intel                   IOC hits for any field of the event
+"""
+from typing import Any, Dict, List
+
+from src.detection.rules.matcher import is_private_ip
+from src.intel.ioc_matcher import IOCMatcher
+
 
 class EventEnricher:
-    """Enrich events with additional context."""
-    
-    def __init__(self):
-        self.cache = {}
-    
-    def enrich_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
-        """Enrich event with additional data."""
-        # Add GeoIP data (simplified - use real GeoIP in production)
-        source_ip = event.get("source_ip")
-        if source_ip:
-            geo_data = self._get_geoip(source_ip)
-            if geo_data:
-                event["source_geo"] = geo_data
-        
-        # Add reputation score
-        if source_ip:
-            reputation = self._get_reputation(source_ip)
-            event["source_reputation"] = reputation
-        
+    def __init__(self, config, matcher: IOCMatcher = None):
+        assets = ((config.get("detection", {}) or {}).get("assets", {}) or {})
+        self.assets: Dict[str, Dict[str, Any]] = {}
+        for item in assets.get("hosts", []) or []:
+            for key in (item.get("ip"), item.get("hostname")):
+                if key:
+                    self.assets[str(key).lower()] = item
+        self.matcher = matcher
+
+    def enrich(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        src, dst = event.get("src_ip"), event.get("dst_ip")
+        if src:
+            event["src_scope"] = "internal" if is_private_ip(src) else "external"
+        if dst:
+            event["dst_scope"] = "internal" if is_private_ip(dst) else "external"
+        if src and dst:
+            s, d = event["src_scope"], event["dst_scope"]
+            event["direction"] = {("external", "internal"): "inbound", ("internal", "external"): "outbound",
+                                  ("internal", "internal"): "internal"}.get((s, d), "external")
+        for key in (dst, event.get("hostname"), src):
+            asset = self.assets.get(str(key).lower()) if key else None
+            if asset:
+                event["asset"] = {"name": asset.get("name") or asset.get("hostname"),
+                                  "criticality": asset.get("criticality", "medium")}
+                break
         return event
-    
-    def _get_geoip(self, ip: str) -> Optional[Dict[str, str]]:
-        """Get GeoIP data (mock implementation)."""
-        # In production, use MaxMind or similar service
-        if ip in self.cache:
-            return self.cache[ip]
-        
-        # Mock data
-        geo = {
-            "country": "US",
-            "city": "Unknown",
-            "latitude": 0.0,
-            "longitude": 0.0
-        }
-        
-        self.cache[ip] = geo
-        return geo
-    
-    def _get_reputation(self, ip: str) -> float:
-        """Get IP reputation score (0-1, higher is better)."""
-        # Mock implementation - use real reputation service in production
-        if ip.startswith("10.") or ip.startswith("192.168."):
-            return 0.9  # Internal IPs generally trusted
-        
-        return 0.5  # Default neutral reputation
+
+    def intel_hits(self, event: Dict[str, Any]) -> List[Dict[str, Any]]:
+        return self.matcher.match_event(event) if self.matcher else []

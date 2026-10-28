@@ -1,0 +1,7 @@
+type,value,source,confidence,description
+cidr,203.0.113.0/25,sample-intel,0.85,Scanning and exploitation infrastructure (documentation range used by the simulator)
+ip,192.0.2.66,sample-intel,0.95,Command-and-control server (simulator)
+ip,192.0.2.67,sample-intel,0.95,Command-and-control server (simulator)
+domain,evil-cdn.example,sample-intel,0.9,Malware update/C2 domain (simulator)
+domain,badupdate.example,sample-intel,0.9,Malware download domain (simulator)
+hash,e99a18c428cb38d5f260853678922e03,sample-intel,0.95,Placeholder hash of a known trojan (simulator)

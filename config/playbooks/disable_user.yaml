@@ -1,0 +1,7 @@
+name: disable_user
+title: Disable user account
+description: Disable the account involved in the alert (via webhook to your identity system) and notify.
+target: user
+actions:
+  - {type: disable_user, user: "{user}"}
+  - {type: notify, message: "Account {user} disabled after '{rule_name}'"}

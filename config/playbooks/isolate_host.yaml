@@ -1,0 +1,7 @@
+name: isolate_host
+title: Isolate host
+description: Ask the EDR to network-isolate the affected host and notify the team.
+target: hostname
+actions:
+  - {type: isolate_host, hostname: "{hostname}"}
+  - {type: notify, message: "Host {hostname} isolated after '{rule_name}' ({severity})"}

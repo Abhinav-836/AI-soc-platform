@@ -1,451 +1,210 @@
 """
-Threat intelligence feed management.
+Threat-intelligence manager.
+
+Sources (all merged into one IOCMatcher used on every event):
+  1. bundled / local files: config/intel/*.csv|*.txt and <data dir>/intel/*
+     CSV columns: type,value,source,confidence,description  (type may be blank)
+  2. IOCs added by analysts (stored in SQLite, survive restarts)
+  3. optional online feeds (abuse.ch Feodo Tracker IPs, URLhaus domains...),
+     refreshed in the background - disabled by default
+  4. on-demand reputation lookups via AbuseIPDB / VirusTotal when API keys are
+     set (Threat Intel -> Lookup)
+
+Previously ThreatIntelManager was imported by the API but never created, so the
+Threat Intel tab was always empty and no event was ever checked against an IOC.
 """
-
 import asyncio
-import json
-import aiohttp
-import aiofiles
-from typing import Dict, List, Any, Optional
-from datetime import datetime, timedelta
+import csv
+import io
+from typing import Any, Dict, List, Optional
 
-from src.core.logger import LoggerMixin
-
-
-class ThreatIntelFeed(LoggerMixin):
-    """Base class for threat intelligence feeds."""
-
-    def __init__(self, name: str, config: Dict[str, Any]):
-        super().__init__()
-        self.name = name
-        self.config = config
-        self.enabled = config.get("enabled", True)
-        self.url = config.get("url", "")
-        self.update_interval = config.get("update_interval", 3600)
-        self.last_update: Optional[datetime] = None
-        self.data: List[Dict[str, Any]] = []
-        self.stats = {
-            "updates": 0,
-            "iocs_fetched": 0,
-            "errors": 0,
-        }
-
-    async def update(self) -> bool:
-        """Update feed data."""
-        if not self.enabled or not self.url:
-            self.logger.warning(f"Feed {self.name} is disabled or has no URL")
-            return False
-
-        try:
-            self.logger.info(f"Updating threat intel feed: {self.name}")
-
-            # Fetch data
-            new_data = await self._fetch_data()
-
-            # Process data
-            processed_data = await self._process_data(new_data)
-
-            # Update stored data
-            self.data = processed_data
-            self.last_update = datetime.utcnow()
-            self.stats["updates"] += 1
-            self.stats["iocs_fetched"] += len(processed_data)
-
-            self.logger.info(
-                f"Feed {self.name} updated with {len(processed_data)} IOCs"
-            )
-            return True
-
-        except Exception as e:
-            self.logger.error(f"Error updating feed {self.name}: {e}", exc_info=True)
-            self.stats["errors"] += 1
-            return False
-
-    async def _fetch_data(self) -> Any:
-        """Fetch raw data from feed URL."""
-        async with aiohttp.ClientSession() as session:
-            async with session.get(self.url) as response:
-                response.raise_for_status()
-                content_type = response.headers.get("Content-Type", "")
-
-                if "application/json" in content_type:
-                    return await response.json()
-                elif "text/plain" in content_type:
-                    return await response.text()
-                else:
-                    return await response.read()
-
-    async def _process_data(self, raw_data: Any) -> List[Dict[str, Any]]:
-        """Process raw feed data into structured IOCs."""
-        raise NotImplementedError
-
-    def get_iocs(self, ioc_type: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Get IOCs from feed, optionally filtered by type."""
-        if ioc_type:
-            return [ioc for ioc in self.data if ioc.get("type") == ioc_type]
-        return self.data.copy()
-
-    def search_iocs(self, query: str) -> List[Dict[str, Any]]:
-        """Search IOCs by value or metadata."""
-        results = []
-        query_lower = query.lower()
-
-        for ioc in self.data:
-            value = str(ioc.get("value", "")).lower()
-            if query_lower in value:
-                results.append(ioc)
-                continue
-
-            # Search in metadata
-            for key, val in ioc.get("metadata", {}).items():
-                if query_lower in str(val).lower():
-                    results.append(ioc)
-                    break
-
-        return results
-
-    def should_update(self) -> bool:
-        """Check if feed should be updated."""
-        if not self.last_update:
-            return True
-
-        next_update = self.last_update + timedelta(seconds=self.update_interval)
-        return datetime.utcnow() >= next_update
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Get feed statistics."""
-        return {
-            "name": self.name,
-            "enabled": self.enabled,
-            "ioc_count": len(self.data),
-            "last_update": self.last_update.isoformat() if self.last_update else None,
-            "next_update": (
-                (self.last_update + timedelta(seconds=self.update_interval)).isoformat()
-                if self.last_update
-                else None
-            ),
-            **self.stats,
-        }
-
-
-class AbuseIPDBFeed(ThreatIntelFeed):
-    """AbuseIPDB threat feed."""
-
-    async def _fetch_data(self) -> Any:
-        """Fetch data from AbuseIPDB API."""
-        api_key = self.config.get("api_key")
-        if not api_key:
-            raise ValueError("AbuseIPDB API key not configured")
-
-        url = "https://api.abuseipdb.com/api/v2/blacklist"
-        headers = {
-            "Key": api_key,
-            "Accept": "application/json",
-        }
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as response:
-                response.raise_for_status()
-                return await response.json()
-
-    async def _process_data(self, raw_data: Any) -> List[Dict[str, Any]]:
-        """Process AbuseIPDB blacklist data."""
-        iocs = []
-
-        if isinstance(raw_data, dict) and "data" in raw_data:
-            for item in raw_data["data"]:
-                ioc = {
-                    "type": "ip",
-                    "value": item.get("ipAddress", ""),
-                    "first_seen": item.get("reportedAt"),
-                    "last_seen": item.get("lastReportedAt"),
-                    "reports": item.get("totalReports", 0),
-                    "abuse_score": item.get("abuseConfidenceScore", 0),
-                    "country": item.get("countryCode"),
-                    "isp": item.get("isp"),
-                    "domain": item.get("domain"),
-                    "feed": self.name,
-                    "metadata": {
-                        "categories": item.get("categories", []),
-                        "is_whitelisted": item.get("isWhitelisted", False),
-                        "is_tor": item.get("isTor", False),
-                    },
-                }
-                iocs.append(ioc)
-
-        return iocs
-
-
-class VirusTotalFeed(ThreatIntelFeed):
-    """VirusTotal threat feed."""
-
-    async def _fetch_data(self) -> Any:
-        """Fetch data from VirusTotal API."""
-        api_key = self.config.get("api_key")
-        if not api_key:
-            raise ValueError("VirusTotal API key not configured")
-
-        # Note: VT doesn't have a direct feed API for free tier
-        # This would need to be implemented based on available endpoints
-        raise NotImplementedError("VirusTotal feed not fully implemented")
-
-    async def _process_data(self, raw_data: Any) -> List[Dict[str, Any]]:
-        """Process VirusTotal data."""
-        # Implementation depends on VT API response format
-        return []
-
-
-class FileBasedFeed(ThreatIntelFeed):
-    """Feed that reads from local files."""
-
-    async def _fetch_data(self) -> Any:
-        """Read data from local file."""
-        file_path = self.config.get("file_path")
-        if not file_path:
-            raise ValueError("File path not configured")
-
-        async with aiofiles.open(file_path, "r") as f:
-            content = await f.read()
-            return content
-
-    async def _process_data(self, raw_data: Any) -> List[Dict[str, Any]]:
-        """Process file-based feed data."""
-        iocs = []
-        lines = raw_data.strip().split("\n")
-
-        for line in lines:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-
-            # Parse IOC based on format
-            ioc = self._parse_ioc_line(line)
-            if ioc:
-                ioc["feed"] = self.name
-                iocs.append(ioc)
-
-        return iocs
-
-    def _parse_ioc_line(self, line: str) -> Optional[Dict[str, Any]]:
-        """Parse a single IOC line."""
-        # Simple parsing - can be extended based on feed format
-        parts = line.split()
-
-        if len(parts) >= 1:
-            value = parts[0]
-
-            # Determine IOC type
-            if self._is_ip(value):
-                ioc_type = "ip"
-            elif self._is_domain(value):
-                ioc_type = "domain"
-            elif self._is_hash(value):
-                ioc_type = "hash"
-            elif self._is_url(value):
-                ioc_type = "url"
-            else:
-                ioc_type = "unknown"
-
-            ioc = {
-                "type": ioc_type,
-                "value": value,
-                "metadata": {
-                    "source_line": line,
-                },
-            }
-
-            # Add additional metadata from line parts
-            if len(parts) > 1:
-                ioc["metadata"]["description"] = " ".join(parts[1:])
-
-            return ioc
-
-        return None
-
-    def _is_ip(self, value: str) -> bool:
-        """Check if value is an IP address."""
-        import ipaddress
-        try:
-            ipaddress.ip_address(value)
-            return True
-        except ValueError:
-            return False
-
-    def _is_domain(self, value: str) -> bool:
-        """Check if value is a domain."""
-        # Simple domain check
-        import re
-        domain_pattern = r"^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-        return bool(re.match(domain_pattern, value))
-
-    def _is_hash(self, value: str) -> bool:
-        """Check if value is a hash."""
-        # MD5, SHA1, SHA256 patterns
-        import re
-        hash_patterns = [
-            r"^[a-fA-F0-9]{32}$",  # MD5
-            r"^[a-fA-F0-9]{40}$",  # SHA1
-            r"^[a-fA-F0-9]{64}$",  # SHA256
-        ]
-
-        for pattern in hash_patterns:
-            if re.match(pattern, value):
-                return True
-        return False
-
-    def _is_url(self, value: str) -> bool:
-        """Check if value is a URL."""
-        import re
-        url_pattern = r"^https?://[^\s/$.?#].[^\s]*$"
-        return bool(re.match(url_pattern, value, re.IGNORECASE))
+from src.core.logger import LoggerMixin, audit
+from src.core.paths import data_dir, resolve
+from src.core.time_utils import iso
+from src.intel.ioc_matcher import IOCMatcher, classify
+from src.storage.cache import TTLCache
 
 
 class ThreatIntelManager(LoggerMixin):
-    """Manages multiple threat intelligence feeds."""
+    def __init__(self, config, store=None):
+        self.cfg = ((config.get("detection", {}) or {}).get("intel", {}) or {})
+        self.enabled = bool(self.cfg.get("enabled", True))
+        self.store = store
+        self.matcher = IOCMatcher()
+        self.cache = TTLCache(ttl_seconds=6 * 3600)
+        self.feeds: List[Dict[str, Any]] = [dict(f) for f in self.cfg.get("feeds", []) or []]
+        self.refresh_interval = float(self.cfg.get("refresh_interval", 6 * 3600))
+        self.abuseipdb_key = ((self.cfg.get("abuseipdb") or {}).get("api_key") or "").strip()
+        self.virustotal_key = ((self.cfg.get("virustotal") or {}).get("api_key") or "").strip()
+        self._task: Optional[asyncio.Task] = None
+        self.stats = {"files_loaded": 0, "file_iocs": 0, "feed_iocs": 0, "manual_iocs": 0, "last_refresh": None}
 
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.feeds: Dict[str, ThreatIntelFeed] = {}
-        self.running = False
-        self.update_task: Optional[asyncio.Task] = None
+    # ------------------------------------------------------------ loading
+    def load(self):
+        if not self.enabled:
+            return
+        dirs = [resolve(p) for p in (self.cfg.get("files") or ["config/intel"])] + [data_dir() / "intel"]
+        for directory in dirs:
+            for path in sorted(directory.glob("*")) if directory.is_dir() else []:
+                if path.suffix.lower() in (".csv", ".txt"):
+                    count = self._load_text(path.read_text(encoding="utf-8-sig", errors="replace"),
+                                            source=f"file:{path.name}", csv_mode=path.suffix.lower() == ".csv")
+                    self.stats["files_loaded"] += 1
+                    self.stats["file_iocs"] += count
+        if self.store:
+            for row in self.store.list_iocs():
+                if self.matcher.add(row["type"], row["value"], row.get("source") or "analyst",
+                                    row.get("confidence") or 0.8, row.get("description") or ""):
+                    self.stats["manual_iocs"] += 1
+        self.logger.info(f"Threat intel loaded: {self.matcher.counts()}")
 
+    def _load_text(self, text: str, source: str, csv_mode: bool, default_type: Optional[str] = None,
+                   confidence: float = 0.8, hostfile: bool = False) -> int:
+        count = 0
+        if csv_mode:
+            for row in csv.DictReader(io.StringIO(text)):
+                value = (row.get("value") or "").strip()
+                if not value or value.startswith("#"):
+                    continue
+                if self.matcher.add(row.get("type") or classify(value) or "", value, row.get("source") or source,
+                                    float(row.get("confidence") or confidence), row.get("description") or ""):
+                    count += 1
+            return count
+        for line in text.splitlines():
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            if hostfile:  # "127.0.0.1\tbad.example"
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                line = parts[1]
+            value = line.split(",")[0].strip()
+            if self.matcher.add(default_type or classify(value) or "", value, source, confidence):
+                count += 1
+        return count
+
+    # ------------------------------------------------------------ feeds
     async def start(self):
-        """Start threat intelligence manager."""
-        self.logger.info("Starting threat intelligence manager...")
-        self.running = True
-
-        # Initialize feeds
-        await self._init_feeds()
-
-        # Start periodic updates
-        self.update_task = asyncio.create_task(self._update_loop())
+        if not self.enabled or not any(f.get("enabled") for f in self.feeds):
+            return
+        self._task = asyncio.create_task(self._refresh_loop())
 
     async def stop(self):
-        """Stop threat intelligence manager."""
-        self.logger.info("Stopping threat intelligence manager...")
-        self.running = False
+        if self._task:
+            self._task.cancel()
 
-        if self.update_task:
-            self.update_task.cancel()
-            try:
-                await self.update_task
-            except asyncio.CancelledError:
-                pass
+    async def _refresh_loop(self):
+        while True:
+            await self.refresh_feeds()
+            await asyncio.sleep(self.refresh_interval)
 
-    async def _init_feeds(self):
-        """Initialize feeds from configuration."""
-        intel_config = self.config.get("response", {}).get("providers", {}).get("enrichment", {})
-
-        # AbuseIPDB feed
-        if intel_config.get("abuseipdb", {}).get("enabled", False):
-            feed = AbuseIPDBFeed("abuseipdb", intel_config["abuseipdb"])
-            self.feeds["abuseipdb"] = feed
-            self.logger.info("Initialized AbuseIPDB feed")
-
-        # VirusTotal feed
-        if intel_config.get("virustotal", {}).get("enabled", False):
-            feed = VirusTotalFeed("virustotal", intel_config["virustotal"])
-            self.feeds["virustotal"] = feed
-            self.logger.info("Initialized VirusTotal feed")
-
-        # File-based feeds
-        file_feeds = self.config.get("intel", {}).get("file_feeds", [])
-        for feed_config in file_feeds:
-            if feed_config.get("enabled", False):
-                feed_name = feed_config.get("name", f"file_feed_{len(self.feeds)}")
-                feed = FileBasedFeed(feed_name, feed_config)
-                self.feeds[feed_name] = feed
-                self.logger.info(f"Initialized file-based feed: {feed_name}")
-
-    async def _update_loop(self):
-        """Periodic feed update loop."""
-        self.logger.info("Starting feed update loop")
-
-        while self.running:
-            try:
-                # Update feeds that need updating
-                for feed in self.feeds.values():
-                    if feed.should_update():
-                        await feed.update()
-
-                # Sleep before next update cycle
-                await asyncio.sleep(60)  # Check every minute
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self.logger.error(f"Error in feed update loop: {e}", exc_info=True)
-                await asyncio.sleep(300)  # Sleep longer on error
-
-    async def update_all_feeds(self):
-        """Update all feeds immediately."""
-        self.logger.info("Updating all threat intelligence feeds")
-
-        tasks = [feed.update() for feed in self.feeds.values()]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        successful = sum(1 for r in results if r is True)
-        failed = sum(1 for r in results if isinstance(r, Exception))
-
-        self.logger.info(f"Feed update complete: {successful} successful, {failed} failed")
-        return successful, failed
-
-    def get_iocs(
-        self,
-        feed_name: Optional[str] = None,
-        ioc_type: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        """Get IOCs from feeds."""
-        iocs = []
-
-        if feed_name:
-            if feed_name in self.feeds:
-                iocs = self.feeds[feed_name].get_iocs(ioc_type)
-        else:
-            for feed in self.feeds.values():
-                iocs.extend(feed.get_iocs(ioc_type))
-
-        return iocs
-
-    def search_iocs(self, query: str, feed_name: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Search IOCs across feeds."""
-        results = []
-
-        if feed_name:
-            if feed_name in self.feeds:
-                results = self.feeds[feed_name].search_iocs(query)
-        else:
-            for feed in self.feeds.values():
-                results.extend(feed.search_iocs(query))
-
+    async def refresh_feeds(self) -> Dict[str, Any]:
+        results = {}
+        try:
+            import aiohttp
+        except ImportError:
+            return {"error": "aiohttp not installed"}
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for feed in self.feeds:
+                if not feed.get("enabled"):
+                    continue
+                name = feed.get("name", feed.get("url"))
+                try:
+                    headers = {"Auth-Key": feed["auth_key"]} if feed.get("auth_key") else {}
+                    async with session.get(feed["url"], headers=headers) as resp:
+                        resp.raise_for_status()
+                        text = await resp.text()
+                    self.matcher.clear_source(f"feed:{name}")
+                    count = self._load_text(text, f"feed:{name}", csv_mode=feed.get("format") == "csv",
+                                            default_type=feed.get("type"),
+                                            confidence=float(feed.get("confidence", 0.8)),
+                                            hostfile=feed.get("format") == "hostfile")
+                    feed.update(last_update=iso(), last_count=count, last_error=None)
+                    results[name] = count
+                except Exception as e:
+                    feed.update(last_error=str(e))
+                    results[name] = f"error: {e}"
+                    self.logger.warning(f"Intel feed {name} failed: {e}")
+        self.stats["feed_iocs"] = sum(f.get("last_count", 0) for f in self.feeds if f.get("enabled"))
+        self.stats["last_refresh"] = iso()
         return results
 
-    def match_ioc(self, value: str, ioc_type: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Find IOCs matching a specific value."""
-        matches = []
+    # ------------------------------------------------------------ analyst actions
+    def add_ioc(self, value: str, ioc_type: Optional[str] = None, confidence: float = 0.8,
+                description: str = "", source: str = "analyst") -> Dict[str, Any]:
+        ioc_type = (ioc_type or classify(value) or "").lower()
+        if not self.matcher.add(ioc_type, value, source, confidence, description):
+            raise ValueError(f"'{value}' is not a valid {ioc_type or 'IOC'}")
+        stored = self.matcher.lookup(value) or {"type": ioc_type, "value": value}
+        if self.store:
+            self.store.add_ioc(stored["type"], stored["value"], source, confidence, description)
+        audit("ioc_added", value=stored["value"], type=stored["type"], source=source)
+        return stored
 
-        for feed in self.feeds.values():
-            feed_iocs = feed.get_iocs(ioc_type)
-            for ioc in feed_iocs:
-                if ioc.get("value") == value:
-                    matches.append(ioc)
+    def remove_ioc(self, ioc_type: str, value: str) -> bool:
+        removed = self.matcher.remove(ioc_type, value)
+        if self.store:
+            removed = self.store.remove_ioc(ioc_type, value.lower()) or removed
+        if removed:
+            audit("ioc_removed", value=value, type=ioc_type)
+        return removed
 
-        return matches
+    def match_event(self, event: Dict[str, Any]) -> List[Dict[str, Any]]:
+        return self.matcher.match_event(event) if self.enabled else []
+
+    def get_iocs(self, ioc_type: Optional[str] = None, search: Optional[str] = None, limit: int = 500):
+        iocs = self.matcher.all()
+        if ioc_type:
+            iocs = [i for i in iocs if i["type"] == ioc_type]
+        if search:
+            s = search.lower()
+            iocs = [i for i in iocs if s in i["value"].lower() or s in (i.get("description") or "").lower()]
+        return {"iocs": iocs[:limit], "total": len(iocs)}
+
+    async def lookup(self, value: str) -> Dict[str, Any]:
+        """Local IOC match plus optional online reputation."""
+        value = value.strip()
+        kind = classify(value)
+        result: Dict[str, Any] = {"value": value, "type": kind, "local": self.matcher.lookup(value), "online": {}}
+        cached = self.cache.get(f"lookup:{value}")
+        if cached is not None:
+            result["online"] = cached
+            return result
+        online = {}
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+                if kind == "ip" and self.abuseipdb_key:
+                    async with session.get("https://api.abuseipdb.com/api/v2/check",
+                                           params={"ipAddress": value, "maxAgeInDays": "90"},
+                                           headers={"Key": self.abuseipdb_key, "Accept": "application/json"}) as r:
+                        data = (await r.json()).get("data", {})
+                        online["abuseipdb"] = {k: data.get(k) for k in (
+                            "abuseConfidenceScore", "totalReports", "countryCode", "isp", "usageType", "isTor")}
+                if kind in ("ip", "domain", "hash") and self.virustotal_key:
+                    path = {"ip": "ip_addresses", "domain": "domains", "hash": "files"}[kind]
+                    async with session.get(f"https://www.virustotal.com/api/v3/{path}/{value}",
+                                           headers={"x-apikey": self.virustotal_key}) as r:
+                        if r.status == 200:
+                            attrs = (await r.json()).get("data", {}).get("attributes", {})
+                            online["virustotal"] = {"last_analysis_stats": attrs.get("last_analysis_stats"),
+                                                    "reputation": attrs.get("reputation")}
+                        else:
+                            online["virustotal"] = {"status": r.status}
+        except Exception as e:
+            online["error"] = str(e)
+        if not online and not (self.abuseipdb_key or self.virustotal_key):
+            online["note"] = "Set ABUSEIPDB_API_KEY / VIRUSTOTAL_API_KEY for online reputation lookups"
+        self.cache.set(f"lookup:{value}", online)
+        result["online"] = online
+        return result
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get threat intelligence statistics."""
-        feed_stats = {}
-        total_iocs = 0
-
-        for feed_name, feed in self.feeds.items():
-            stats = feed.get_stats()
-            feed_stats[feed_name] = stats
-            total_iocs += stats.get("ioc_count", 0)
-
-        return {
-            "running": self.running,
-            "feed_count": len(self.feeds),
-            "total_iocs": total_iocs,
-            "feeds": feed_stats,
-        }
+        return {"enabled": self.enabled, "counts": self.matcher.counts(), "total": len(self.matcher.all()),
+                "hits": self.matcher.hit_count,
+                "feeds": [{k: f.get(k) for k in ("name", "enabled", "url", "last_update", "last_count", "last_error")}
+                          for f in self.feeds],
+                "online_lookups": {"abuseipdb": bool(self.abuseipdb_key), "virustotal": bool(self.virustotal_key)},
+                **self.stats}

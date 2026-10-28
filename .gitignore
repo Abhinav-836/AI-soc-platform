@@ -1,51 +1,35 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
+.pytest_cache/
+.coverage
+htmlcov/
 
-# Virtual Environment
+# Environments
 venv/
+.venv/
+.venv-desktop/
 env/
 .env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
+.env.*
+!.env.example
 
-# IDE
+# Runtime data (database, logs, trained model, raw logs, state)
+data/
+logs/
+*.db
+*.db-shm
+*.db-wal
+
+# Desktop build
+build/
+dist/
+desktop/assets/
+
+# IDE / OS
 .vscode/
 .idea/
 *.swp
-*.swo
-
-# Data
-data/raw/
-data/processed/
-data/models/
-logs/*.log
-!logs/.gitkeep
-
-# OS
 .DS_Store
 Thumbs.db
-
-# Docker
-*.db
-*.sqlite3

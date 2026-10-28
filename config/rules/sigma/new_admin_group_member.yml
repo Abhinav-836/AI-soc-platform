@@ -1,0 +1,14 @@
+title: User added to privileged group (Sigma example)
+id: SIGMA-ADMIN-GROUP
+status: experimental
+description: Example Sigma rule loaded by the built-in Sigma engine.
+level: high
+tags: [attack.persistence, attack.t1098]
+logsource: {product: linux, category: account}
+detection:
+  selection:
+    event_type: group_change
+    change: member_added
+  privileged:
+    group: [sudo, wheel, root]
+  condition: selection and privileged

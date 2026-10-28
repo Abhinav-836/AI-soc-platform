@@ -1,0 +1,8 @@
+name: block_ip
+title: Block attacker IP
+description: Block inbound traffic from the alert's source IP at the host firewall, add it to threat intel and notify the team.
+target: src_ip
+actions:
+  - {type: block_ip, ip: "{src_ip}"}
+  - {type: add_ioc, value: "{src_ip}", description: "Blocked after alert {alert_id}: {rule_name}"}
+  - {type: notify, message: "Blocked {src_ip} after '{rule_name}' ({severity})"}

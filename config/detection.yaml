@@ -1,81 +1,82 @@
 rules:
-  sigma:
-    enabled: true
-    paths:
-      - "./rules/sigma/"
-    update_interval: 3600
-
-  yara:
-    enabled: true
-    paths:
-      - "./rules/yara/"
-    update_interval: 3600
-
+  paths: [config/rules]            # YAML rule files (see config/rules/default_rules.yaml)
   custom:
     enabled: true
-    rules:
-      - id: "CUSTOM-001"
-        name: "Multiple Failed SSH Logins"
-        description: "Detect multiple failed SSH login attempts from same IP"
-        severity: "medium"
-        category: "brute_force"
-        condition: |
-          event_type == "ssh_failed" AND
-          count_events(time_window="5m", src_ip=src_ip) > 5
-        actions:
-          - "alert"
-          - "enrich_ip"
+    rules: []                      # inline rules, same format
+  sigma:
+    enabled: true
+    paths: [config/rules/sigma]
 
-      - id: "CUSTOM-002"
-        name: "Unusual Process Execution"
-        description: "Detect unusual process execution patterns"
-        severity: "high"
-        category: "malware"
-        condition: |
-          event_type == "process_execution" AND
-          process_name not in whitelist AND
-          parent_process not in expected_parents
-        actions:
-          - "alert"
-          - "isolate_host"
+correlation:
+  enabled: true
+  chains:
+    - id: CHAIN-001
+      name: Successful login after brute force
+      description: A source that was brute-forcing logins then logged in successfully - likely compromised account.
+      first: {category: brute_force}
+      then_event: {event_type: [ssh_accepted, rdp_accepted, web_auth_success]}
+      key: src_ip
+      window: 30m
+      severity: critical
+      mitre: [T1110, T1078]
+      response: [block_ip]
+    - id: CHAIN-002
+      name: Reconnaissance followed by attack
+      description: The same source scanned the network and then attacked an application.
+      first: {category: reconnaissance}
+      then_alert: {category: [web_attack, brute_force]}
+      key: src_ip
+      window: 30m
+      severity: critical
+      mitre: [T1595, T1190]
+      response: [block_ip]
+    - id: CHAIN-003
+      name: Infected host talking to known-bad infrastructure
+      description: Malware on a host followed by contact with threat-intel indicators or exfiltration.
+      first: {category: malware}
+      then_alert: {category: [threat_intel, command_and_control, exfiltration]}
+      key: hostname
+      window: 60m
+      severity: critical
+      mitre: [T1204, T1071]
+      response: [isolate_host]
+    - id: CHAIN-004
+      name: Credential theft followed by persistence
+      first: {category: credential_access}
+      then_alert: {category: persistence}
+      key: hostname
+      window: 30m
+      severity: critical
+      mitre: [T1003, T1098]
+      response: [isolate_host]
 
-thresholds:
-  brute_force:
-    failed_logins: 5
-    time_window: "5m"
-    cooldown: "1h"
-
-  port_scan:
-    unique_ports: 10
-    time_window: "2m"
-    src_ip_group_size: 1
-
-  data_exfiltration:
-    data_transfer_size: 104857600
-    time_window: "10m"
+intel:
+  enabled: true
+  files: [config/intel]            # *.csv (type,value,source,confidence,description) or *.txt
+  refresh_interval: 21600
+  feeds:                           # free public feeds; enable if this machine has internet access
+    - name: feodotracker_ips
+      enabled: false
+      url: https://feodotracker.abuse.ch/downloads/ipblocklist.txt
+      type: ip
+      format: plain
+      confidence: 0.9
+    - name: urlhaus_domains
+      enabled: false
+      url: https://urlhaus.abuse.ch/downloads/hostfile/
+      type: domain
+      format: hostfile
+      confidence: 0.8
+  abuseipdb: {api_key: "${ABUSEIPDB_API_KEY:-}"}
+  virustotal: {api_key: "${VIRUSTOTAL_API_KEY:-}"}
 
 scoring:
-  severity_weights:
-    low: 1
-    medium: 3
-    high: 5
-    critical: 10
-
-  confidence_weights:
-    low: 0.3
-    medium: 0.6
-    high: 0.9
-
-  composite_threshold: 7.5
+  escalate_at: 80
   auto_escalate: true
 
-# Add whitelist section
-whitelist:
-  ip_ranges:
-    - "10.0.0.0/8"
-    - "172.16.0.0/12"
-    - "192.168.0.0/16"
-  processes:
-    - "systemd"
-    - "init"
-    - "kernel_task"
+assets:                            # known hosts raise alert scores when targeted
+  hosts:
+    - {hostname: db-01, ip: 10.10.2.20, criticality: critical}
+    - {hostname: dc-01, ip: 10.10.2.5, criticality: critical}
+    - {hostname: web-01, ip: 10.10.2.10, criticality: high}
+    - {hostname: bastion-01, ip: 10.10.2.15, criticality: high}

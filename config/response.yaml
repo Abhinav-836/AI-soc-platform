@@ -1,136 +1,40 @@
-playbooks:
-  block_ip:
-    enabled: true
-    description: "Block malicious IP address"
-    stop_on_failure: true
-    require_approval: true
-    actions:
-      - name: "enrich_ip_info"
-        provider: "abuseipdb"
-        enabled: true
+# What happens when the platform responds to an alert.
+#   dry_run : actions are planned, approved and logged, but nothing is changed
+#   enforce : actions really run (firewall rules, EDR/webhook calls)
+mode: ${SOC_RESPONSE_MODE:-dry_run}
 
-      - name: "check_firewall_rules"
-        provider: "iptables"
-        enabled: true
-        command: "iptables -C INPUT -s {ip} -j DROP"
+playbooks_dir: config/playbooks
 
-      - name: "block_ip"
-        provider: "iptables"
-        enabled: true
-        command: "iptables -A INPUT -s {ip} -j DROP"
-        require_approval: false
-
-      - name: "notify_soc"
-        provider: "slack"
-        enabled: true
-        channel: "#soc-alerts"
-        template: "blocked_ip_alert.j2"
-
-  brute_force_response:
-    enabled: true
-    description: "Respond to brute force attacks"
-    stop_on_failure: false
-    require_approval: false
-    triggers:
-      - "CUSTOM-001"
-      - "SIGMA-SSH-BruteForce"
-    actions:
-      - name: "rate_limit_ssh"
-        provider: "fail2ban"
-        enabled: true
-        jail: "ssh"
-        bantime: "3600"
-
-      - name: "notify_admin"
-        provider: "email"
-        enabled: true
-        recipients:
-          - "soc@example.com"
-        subject: "Brute Force Attack Detected"
-
-      - name: "increase_logging"
-        provider: "syslog"
-        enabled: true
-        facility: "auth"
-        level: "info"
-
-  malware_containment:
-    enabled: true
-    description: "Contain malware infection"
-    stop_on_failure: true
-    require_approval: true
-    actions:
-      - name: "isolate_host"
-        provider: "edr"
-        enabled: true
-        api_endpoint: "https://edr.example.com/api/isolate"
-
-      - name: "collect_forensics"
-        provider: "velociraptor"
-        enabled: true
-        artifact: "Windows.Forensics.ProcessInfo"
-
-      - name: "scan_host"
-        provider: "clamav"
-        enabled: true
-        scan_path: "C:\\"
-
-providers:
-  firewall:
-    iptables:
-      enabled: true
-      sudo_required: true
-
-    windows_firewall:
-      enabled: false
-      ps_executable: "powershell.exe"
-
-  notification:
-    slack:
-      enabled: true
-      webhook_url: "${SLACK_WEBHOOK_URL}"
-      default_channel: "#soc-alerts"
-
-    email:
-      enabled: true
-      smtp_server: "smtp.example.com"
-      smtp_port: 587
-      username: "${SMTP_USERNAME}"
-      password: "${SMTP_PASSWORD}"
-      from_address: "soc@example.com"
-
-    teams:
-      enabled: false
-      webhook_url: "${TEAMS_WEBHOOK_URL}"
-
-  enrichment:
-    virustotal:
-      enabled: true
-      api_key: "${VIRUSTOTAL_API_KEY}"
-      base_url: "https://www.virustotal.com/api/v3"
-
-    abuseipdb:
-      enabled: true
-      api_key: "${ABUSEIPDB_API_KEY}"
-      base_url: "https://api.abuseipdb.com/api/v2"
-
-    shodan:
-      enabled: false
-      api_key: "${SHODAN_API_KEY}"
+auto_response:
+  enabled: true            # create a response for new alerts that suggest a playbook
+  min_severity: high       # ... at or above this severity
 
 approval:
-  required_for:
-    - "block_ip"
-    - "isolate_host"
-    - "quarantine_file"
+  # action types that wait for an analyst to click Approve (cannot be bypassed by API callers)
+  required_for: [block_ip, isolate_host, disable_user]
 
-  approval_timeout: 300
-  approvers:
-    - "soc-lead@example.com"
-    - "security-manager@example.com"
+firewall:
+  backend: auto            # auto | windows | iptables | none
+  block_duration: 3600     # seconds; 0 = permanent
+  allow_private: false     # never block internal (RFC1918) addresses unless true
+  protected: []            # extra IPs/CIDRs that must never be blocked (gateways, scanners you own)
 
-# Add rate limiting
-rate_limits:
-  enabled: true
-  requests_per_minute: 100
-  burst: 20
+edr:
+  isolate_webhook: ${EDR_ISOLATE_URL:-}        # POSTed {"action", "target", "response_id"} on isolate_host (enforce)
+identity:
+  disable_webhook: ${IDENTITY_DISABLE_URL:-}   # same, for disable_user
+
+notifications:
+  min_severity: high       # alert notifications at or above this severity
+  slack: {enabled: false, webhook_url: "${SLACK_WEBHOOK_URL:-}"}
+  teams: {enabled: false, webhook_url: "${TEAMS_WEBHOOK_URL:-}"}
+  webhook: {enabled: false, url: "${SOC_WEBHOOK_URL:-}"}
+  email:
+    enabled: false
+    smtp_host: ${SMTP_HOST:-}
+    smtp_port: 587
+    starttls: true
+    username: ${SMTP_USERNAME:-}
+    password: ${SMTP_PASSWORD:-}
+    from: soc@example.com
+    to: [soc-team@example.com]

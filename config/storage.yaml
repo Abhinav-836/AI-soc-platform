@@ -1,13 +1,11 @@
-storage:
-  local_path: ./data
-  compression: true
-  
-  elasticsearch:
-    enabled: false  # Set to false to disable Elasticsearch
-    host: localhost
-    port: 9200
-    username: ""
-    password: ""
-    use_ssl: false
-    verify_certs: false
-    index_prefix: ai-soc
+sqlite:
+  path: data/soc.db          # inside the data folder
+  max_events: 50000          # older events are pruned; alerts are kept
+
+elasticsearch:               # optional mirror for Kibana; SQLite stays the source of truth
+  enabled: false
+  url: ${ELASTIC_URL:-http://localhost:9200}
+  username: ${ELASTIC_USER:-}
+  password: ${ELASTIC_PASSWORD:-}
+  verify_certs: false
+  index_prefix: ai-soc

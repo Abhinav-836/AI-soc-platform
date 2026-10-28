@@ -1,0 +1,4 @@
+# Extra packages for building the desktop app (on top of ../requirements.txt)
+pywebview>=5.0          # native window (Edge WebView2 on Windows)
+pyinstaller>=6.6        # freezes Python + dependencies into a folder with an .exe
+pillow>=10.0            # draws the app icon at build time

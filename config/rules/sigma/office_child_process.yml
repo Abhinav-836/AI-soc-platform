@@ -1,0 +1,13 @@
+title: Unusual child process of an e-mail client (Sigma example)
+id: SIGMA-MAIL-CHILD
+status: experimental
+description: A process started by Outlook that is not a known helper - typical of a malicious attachment.
+level: medium
+tags: [attack.execution, attack.t1204]
+logsource: {product: windows, category: process_creation}
+detection:
+  selection:
+    ParentImage|endswith: outlook.exe
+  known_helpers:
+    Image|endswith: [winword.exe, excel.exe, powerpnt.exe, acrord32.exe, msedge.exe, chrome.exe]
+  condition: selection and not known_helpers

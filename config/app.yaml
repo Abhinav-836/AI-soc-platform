@@ -1,19 +1,16 @@
-﻿app:
+app:
   name: AI SOC Platform
-  version: 1.0.0
-  environment: production
-  debug: false
-  workers: 4
-  timezone: UTC
+  version: 2.0.0
+  environment: ${APP_ENV:-development}
 
-# Server settings
 server:
-  host: 0.0.0.0
-  port: 8080
-  reload: false
+  host: ${SOC_HOST:-127.0.0.1}       # 0.0.0.0 to listen on the network (set an API key first!)
+  port: ${SOC_PORT:-8080}
+  # Required header X-API-Key for /api/* and ?api_key= for /ws when set
+  api_key: ${SOC_API_KEY:-}
+  cors_origins: ["http://localhost:8080", "http://127.0.0.1:8080"]
 
-# Security
-security:
-  secret_key: "${SECRET_KEY}"
-  jwt_expiry_hours: 24
-  bcrypt_rounds: 12
+simulation:
+  autostart: false          # start the traffic simulator on launch
+  rate: 5                   # events per second
+  attack_interval: 45       # mean seconds between injected attacks

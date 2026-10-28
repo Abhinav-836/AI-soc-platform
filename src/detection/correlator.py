@@ -1,209 +1,122 @@
 """
-Event correlation engine.
-"""
+Attack-chain correlation: multi-stage detections across alerts and events.
 
-from typing import Dict, List, Any, Set
-from datetime import datetime, timedelta
-from collections import defaultdict
+  chains:
+    - id: CHAIN-001
+      name: Successful login after brute force
+      first: {category: brute_force}            # an alert ...
+      then_event: {event_type: ssh_accepted}    # ... followed by an event, or
+      # then_alert: {category: [web_attack]}    # ... followed by another alert
+      key: src_ip                               # same attacker / host
+      window: 30m
+      severity: critical
+      mitre: [T1110, T1078]
+
+The old correlator compared timezone-aware event times with naive
+datetime.utcnow() (TypeError on every run, so it never fired), counted
+port-scan *events* instead of distinct ports, and re-raised the same
+correlation alert every second with an ID that collided within a second.
+"""
+from typing import Any, Dict, List, Optional
 
 from src.core.logger import LoggerMixin
+from src.core.time_utils import parse_ts, parse_window, utcnow
+from src.detection.rules.matcher import compile_mapping
+
+
+class Chain:
+    def __init__(self, spec: Dict[str, Any]):
+        self.id = spec["id"]
+        self.name = spec.get("name", self.id)
+        self.description = spec.get("description", "")
+        self.first = compile_mapping(spec.get("first"))
+        self.then_event = compile_mapping(spec["then_event"]) if spec.get("then_event") else None
+        self.then_alert = compile_mapping(spec["then_alert"]) if spec.get("then_alert") else None
+        self.key = spec.get("key", "src_ip")
+        self.window = parse_window(spec.get("window", "30m"))
+        self.severity = spec.get("severity", "critical")
+        self.mitre = list(spec.get("mitre", []) or [])
+        self.response = list(spec.get("response", []) or [])
+        self.first_seen: Dict[str, Dict[str, Any]] = {}  # key value -> first-stage alert summary
+        self.hits = 0
+
+    def hit(self, key_value: str, first: Dict[str, Any], second: Dict[str, Any],
+            events: List[Dict[str, Any]]) -> Dict[str, Any]:
+        self.hits += 1
+        return {
+            "rule_id": self.id, "rule_name": self.name, "description": self.description,
+            "severity": self.severity, "category": "attack_chain", "mitre": self.mitre, "confidence": 0.9,
+            "response": self.response, "source": "correlation", "cooldown": self.window, "references": [],
+            "group": {self.key: key_value}, "group_key": str(key_value), "count": 1, "events": events,
+            "evidence": {"stages": [first, second], "window_seconds": self.window},
+        }
 
 
 class CorrelationEngine(LoggerMixin):
-    """Correlates events to detect complex patterns."""
-
     def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.events: List[Dict[str, Any]] = []
-        self.windows: Dict[str, Any] = {}
-        self.patterns = self._load_correlation_patterns()
-
-    def _load_correlation_patterns(self) -> List[Dict[str, Any]]:
-        """Load correlation patterns from config."""
-        thresholds = self.config.get("detection", {}).get("thresholds", {})
-
-        patterns = []
-
-        # Brute force pattern
-        brute_force = thresholds.get("brute_force", {})
-        patterns.append({
-            "name": "brute_force_attempts",
-            "description": "Multiple failed authentication attempts",
-            "conditions": [
-                {"event_type": "ssh_failed"},
-                {"event_type": "rdp_failed"},
-                {"event_type": "web_auth_failed"},
-            ],
-            "window": brute_force.get("time_window", "5m"),
-            "threshold": brute_force.get("failed_logins", 5),
-            "group_by": ["src_ip", "user"],
-            "severity": "high",
-        })
-
-        # Port scan pattern
-        port_scan = thresholds.get("port_scan", {})
-        patterns.append({
-            "name": "port_scan_detected",
-            "description": "Multiple ports scanned from single IP",
-            "conditions": [
-                {"event_type": "firewall_drop"},
-                {"status": "denied"},
-            ],
-            "window": port_scan.get("time_window", "2m"),
-            "threshold": port_scan.get("unique_ports", 10),
-            "group_by": ["src_ip"],
-            "severity": "medium",
-        })
-
-        return patterns
-
-    async def add_event(self, event: Dict[str, Any]):
-        """Add event to correlation engine."""
-        self.events.append(event)
-
-        # Keep only last 24 hours of events
-        cutoff = datetime.utcnow() - timedelta(hours=24)
-        self.events = [
-            e for e in self.events
-            if datetime.fromisoformat(e.get("@timestamp", "").replace("Z", "+00:00")) > cutoff
-        ]
-
-    async def run_correlation(self) -> List[Dict[str, Any]]:
-        """Run correlation and return alerts."""
-        alerts = []
-
-        for pattern in self.patterns:
+        cfg = ((config.get("detection", {}) or {}).get("correlation", {}) or {})
+        self.enabled = bool(cfg.get("enabled", True))
+        self.chains: List[Chain] = []
+        for spec in cfg.get("chains", []) or []:
             try:
-                pattern_alerts = await self._check_pattern(pattern)
-                alerts.extend(pattern_alerts)
+                self.chains.append(Chain(spec))
             except Exception as e:
-                self.logger.error(f"Error checking pattern {pattern['name']}: {e}", exc_info=True)
+                self.logger.warning(f"Invalid correlation chain {spec.get('id')}: {e}")
 
-        return alerts
+    @staticmethod
+    def _alert_view(alert: Dict[str, Any]) -> Dict[str, Any]:
+        entity = alert.get("entity") or {}
+        return {"alert_id": alert["id"], "rule_id": alert.get("rule_id"), "rule_name": alert.get("rule_name"),
+                "category": alert.get("category"), "severity": alert.get("severity"), "source": alert.get("source"),
+                "at": alert.get("last_seen") or alert.get("created_at"), **entity}
 
-    async def _check_pattern(self, pattern: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Check events against a correlation pattern."""
-        window = self._parse_time_window(pattern["window"])
-        threshold = pattern["threshold"]
-        group_by = pattern.get("group_by", [])
+    def _fresh(self, chain: Chain, key_value: str, at: Any = None) -> Optional[Dict[str, Any]]:
+        """First stage for this key, if the second stage (at `at`, event time) falls inside the window.
+        Event time - not wall-clock time - so imported/replayed logs correlate correctly."""
+        first = chain.first_seen.get(key_value)
+        if not first:
+            return None
+        first_ts = parse_ts(first.get("at"))
+        second_ts = parse_ts(at) or utcnow()
+        if first_ts and (second_ts - first_ts).total_seconds() > chain.window:
+            del chain.first_seen[key_value]
+            return None
+        return first
 
-        # Get events in time window
-        window_end = datetime.utcnow()
-        window_start = window_end - window
+    def on_alert(self, alert: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not self.enabled or alert.get("source") == "correlation":
+            return []
+        view = self._alert_view(alert)
+        hits = []
+        for chain in self.chains:
+            key_value = view.get(chain.key)
+            if not key_value:
+                continue
+            if chain.then_alert and chain.then_alert(view):
+                first = self._fresh(chain, str(key_value), view.get("at"))
+                if first and first["alert_id"] != view["alert_id"]:
+                    hits.append(chain.hit(str(key_value), first, view, alert.get("sample_events", [])[:3]))
+            if chain.first(view):
+                chain.first_seen[str(key_value)] = view
+        return hits
 
-        relevant_events = [
-            e for e in self.events
-            if self._event_matches_conditions(e, pattern["conditions"]) and
-            self._is_in_window(e, window_start, window_end)
-        ]
-
-        # Group events
-        grouped_events = self._group_events(relevant_events, group_by)
-
-        # Check thresholds
-        alerts = []
-        for group_key, events in grouped_events.items():
-            if len(events) >= threshold:
-                alert = self._create_correlation_alert(pattern, group_key, events)
-                alerts.append(alert)
-
-        return alerts
-
-    def _event_matches_conditions(
-        self, event: Dict[str, Any], conditions: List[Dict[str, Any]]
-    ) -> bool:
-        """Check if event matches any of the conditions."""
-        for condition in conditions:
-            if all(event.get(k) == v for k, v in condition.items()):
-                return True
-        return False
-
-    def _is_in_window(
-        self, event: Dict[str, Any], window_start: datetime, window_end: datetime
-    ) -> bool:
-        """Check if event is in time window."""
-        try:
-            event_time = datetime.fromisoformat(
-                event.get("@timestamp", "").replace("Z", "+00:00")
-            )
-            return window_start <= event_time <= window_end
-        except (ValueError, KeyError):
-            return False
-
-    def _group_events(
-        self, events: List[Dict[str, Any]], group_by: List[str]
-    ) -> Dict[str, List[Dict[str, Any]]]:
-        """Group events by specified fields."""
-        grouped = defaultdict(list)
-
-        for event in events:
-            key_parts = []
-            for field in group_by:
-                value = event.get(field, "")
-                key_parts.append(str(value))
-
-            group_key = "|".join(key_parts)
-            grouped[group_key].append(event)
-
-        return dict(grouped)
-
-    def _create_correlation_alert(
-        self, pattern: Dict[str, Any], group_key: str, events: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        """Create correlation alert."""
-        group_values = group_key.split("|")
-
-        alert = {
-            "alert_id": self._generate_alert_id(),
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "pattern_name": pattern["name"],
-            "pattern_description": pattern["description"],
-            "severity": pattern.get("severity", "medium"),
-            "event_count": len(events),
-            "window": pattern["window"],
-            "threshold": pattern["threshold"],
-            "group_values": dict(zip(pattern.get("group_by", []), group_values)),
-            "sample_events": events[:5],  # Include sample events
-            "first_seen": min(
-                e.get("@timestamp", "") for e in events
-            ),
-            "last_seen": max(
-                e.get("@timestamp", "") for e in events
-            ),
-        }
-
-        return alert
-
-    def _parse_time_window(self, window_str: str) -> timedelta:
-        """Parse time window string to timedelta."""
-        if window_str.endswith("m"):
-            minutes = int(window_str[:-1])
-            return timedelta(minutes=minutes)
-        elif window_str.endswith("h"):
-            hours = int(window_str[:-1])
-            return timedelta(hours=hours)
-        elif window_str.endswith("d"):
-            days = int(window_str[:-1])
-            return timedelta(days=days)
-        else:
-            # Default to minutes
-            return timedelta(minutes=int(window_str))
-
-    def _generate_alert_id(self) -> str:
-        """Generate unique correlation alert ID."""
-        timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
-        return f"CORR-{timestamp}"
+    def on_event(self, event: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not self.enabled:
+            return []
+        hits = []
+        for chain in self.chains:
+            if not chain.then_event:
+                continue
+            key_value = event.get(chain.key)
+            if not key_value or not chain.then_event(event):
+                continue
+            first = self._fresh(chain, str(key_value), event.get("@timestamp"))
+            if first:
+                second = {"event_id": event.get("event_id"), "event_type": event.get("event_type"),
+                          "at": event.get("@timestamp"), "user": event.get("user")}
+                hits.append(chain.hit(str(key_value), first, second, [event]))
+        return hits
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get correlation engine statistics."""
-        return {
-            "events_in_memory": len(self.events),
-            "active_patterns": len(self.patterns),
-            "time_windows": len(self.windows),
-        }
-
-    def clear_events(self):
-        """Clear all stored events."""
-        self.events.clear()
-        self.windows.clear()
+        return {"enabled": self.enabled, "chains": [{"id": c.id, "name": c.name, "hits": c.hits,
+                                                     "tracking": len(c.first_seen)} for c in self.chains]}

@@ -1,0 +1,6 @@
+name: notify_team
+title: Notify SOC team
+description: Send the alert summary to the configured channels (Slack, Teams, webhook, e-mail).
+target: null
+actions:
+  - {type: notify, message: "[{severity}] {rule_name} - {entity}"}

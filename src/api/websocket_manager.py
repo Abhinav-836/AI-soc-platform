@@ -1,172 +1,99 @@
 """
-WebSocket Manager for real-time communication.
-"""
+WebSocket fan-out.
 
+Each client gets its own bounded queue and writer task, so one slow browser
+can't stall detection or other clients. Live events are rate-limited
+(default 20/s per client); alerts, responses and stats are always delivered.
+
+The old manager let clients "subscribe" by mutating a shared dict directly
+from the endpoint, never removed those extra subscriptions on disconnect,
+and swallowed close errors with bare `except:`.
+"""
 import asyncio
-import json
-from typing import Dict, List, Any, Optional, Set
-from datetime import datetime
-from enum import Enum
+import time
+from typing import Any, Dict, Optional
+
+from fastapi import WebSocket
 
 from src.core.logger import LoggerMixin
+from src.core.time_utils import iso
 
 
-class EventType(str, Enum):
-    """WebSocket event types."""
-    ALERT = "alert"
-    EVENT = "event"
-    STATS = "stats"
-    HEALTH = "health"
-    INTEL = "intel"
-    RESPONSE = "response"
-    SYSTEM = "system"
+class _Client:
+    def __init__(self, ws: WebSocket, channels: set):
+        self.ws = ws
+        self.channels = channels
+        self.queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        self.task: Optional[asyncio.Task] = None
+        self.window_start = time.monotonic()
+        self.events_in_window = 0
+        self.dropped = 0
 
 
 class WebSocketManager(LoggerMixin):
-    """Manage WebSocket connections for real-time updates."""
-    
-    def __init__(self):
-        self.active_connections: Dict[str, Set[Any]] = {}
-        self.connection_metadata: Dict[Any, Dict[str, Any]] = {}
-        self.event_handlers: Dict[EventType, List] = {}
-        self.broadcast_queue = asyncio.Queue()
-        self.running = False
-        
-    async def start(self):
-        """Start WebSocket manager."""
+    def __init__(self, max_events_per_second: int = 20):
+        self.clients: Dict[int, _Client] = {}
+        self.max_eps = max_events_per_second
         self.running = True
-        asyncio.create_task(self._broadcast_worker())
-        self.logger.info("WebSocket manager started")
-    
-    async def stop(self):
-        """Stop WebSocket manager."""
-        self.running = False
-        for channel in self.active_connections.values():
-            for conn in channel:
-                try:
-                    await conn.close()
-                except:
-                    pass
-        self.active_connections.clear()
-        self.logger.info("WebSocket manager stopped")
-    
-    async def connect(self, websocket, channel: str = "default", metadata: Dict[str, Any] = None):
-        """Accept a WebSocket connection."""
-        await websocket.accept()
-        
-        if channel not in self.active_connections:
-            self.active_connections[channel] = set()
-        
-        self.active_connections[channel].add(websocket)
-        self.connection_metadata[websocket] = metadata or {
-            "channel": channel,
-            "connected_at": datetime.utcnow().isoformat(),
-        }
-        
-        self.logger.info(f"WebSocket connected to channel '{channel}': {websocket.client}")
-        
-        # Send initial connection confirmation
-        await websocket.send_json({
-            "type": "connection",
-            "status": "connected",
-            "channel": channel,
-            "timestamp": datetime.utcnow().isoformat()
-        })
-    
-    def disconnect(self, websocket, channel: str = None):
-        """Remove a WebSocket connection."""
-        if channel:
-            if channel in self.active_connections and websocket in self.active_connections[channel]:
-                self.active_connections[channel].remove(websocket)
-        else:
-            # Find and remove from any channel
-            for ch, conns in self.active_connections.items():
-                if websocket in conns:
-                    conns.remove(websocket)
-                    break
-        
-        if websocket in self.connection_metadata:
-            del self.connection_metadata[websocket]
-        
-        self.logger.info(f"WebSocket disconnected")
-    
-    async def broadcast(self, message: Dict[str, Any], channel: str = None, event_type: str = None):
-        """Broadcast message to all or specific channel."""
-        if event_type:
-            message["event_type"] = event_type
-        
-        message["timestamp"] = datetime.utcnow().isoformat()
-        
-        # Add to queue for processing
-        await self.broadcast_queue.put({
-            "message": message,
-            "channel": channel
-        })
-    
-    async def _broadcast_worker(self):
-        """Worker to broadcast messages."""
-        while self.running:
-            try:
-                item = await self.broadcast_queue.get()
-                message = item["message"]
-                channel = item["channel"]
-                
-                if channel and channel in self.active_connections:
-                    connections = self.active_connections[channel]
-                elif not channel:
-                    # Broadcast to all channels
-                    connections = set()
-                    for conns in self.active_connections.values():
-                        connections.update(conns)
-                else:
-                    connections = set()
-                
-                # Send to all connections
-                disconnected = []
-                for conn in connections:
-                    try:
-                        await conn.send_json(message)
-                    except Exception as e:
-                        self.logger.debug(f"Failed to send to WebSocket: {e}")
-                        disconnected.append(conn)
-                
-                # Clean up disconnected
-                for conn in disconnected:
-                    self.disconnect(conn)
-                
-                self.broadcast_queue.task_done()
-                
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self.logger.error(f"Error in broadcast worker: {e}", exc_info=True)
-                await asyncio.sleep(0.1)
-    
-    async def send_personal(self, message: Dict[str, Any], websocket):
-        """Send message to specific client."""
+        self.messages_sent = 0
+
+    async def connect(self, ws: WebSocket, channels: Optional[set] = None) -> _Client:
+        await ws.accept()
+        client = _Client(ws, channels or {"all"})
+        client.task = asyncio.create_task(self._writer(client))
+        self.clients[id(ws)] = client
+        await client.queue.put({"type": "connection", "status": "connected", "timestamp": iso()})
+        return client
+
+    def disconnect(self, ws: WebSocket):
+        client = self.clients.pop(id(ws), None)
+        if client and client.task:
+            client.task.cancel()
+
+    async def _writer(self, client: _Client):
         try:
-            await websocket.send_json(message)
-            return True
-        except Exception as e:
-            self.logger.debug(f"Failed to send personal message: {e}")
-            return False
-    
+            while True:
+                message = await client.queue.get()
+                await client.ws.send_json(message)
+                self.messages_sent += 1
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            self.clients.pop(id(client.ws), None)
+
+    def broadcast(self, message: Dict[str, Any], channel: str = "all"):
+        """Non-blocking. channel: event | alert | response | stats | simulation."""
+        message.setdefault("timestamp", iso())
+        now = time.monotonic()
+        for client in list(self.clients.values()):
+            if "all" not in client.channels and channel not in client.channels:
+                continue
+            if channel == "event":
+                if now - client.window_start >= 1:
+                    client.window_start, client.events_in_window = now, 0
+                if client.events_in_window >= self.max_eps:
+                    client.dropped += 1
+                    continue
+                client.events_in_window += 1
+            try:
+                client.queue.put_nowait(message)
+            except asyncio.QueueFull:
+                client.dropped += 1
+
+    async def stop(self):
+        self.running = False
+        for client in list(self.clients.values()):
+            if client.task:
+                client.task.cancel()
+            try:
+                await client.ws.close()
+            except Exception:
+                pass
+        self.clients.clear()
+
     def get_connection_count(self) -> int:
-        """Get total number of active connections."""
-        return sum(len(conns) for conns in self.active_connections.values())
-    
-    def get_channels(self) -> List[str]:
-        """Get list of active channels."""
-        return list(self.active_connections.keys())
-    
+        return len(self.clients)
+
     def get_stats(self) -> Dict[str, Any]:
-        """Get WebSocket manager statistics."""
-        return {
-            "total_connections": self.get_connection_count(),
-            "channels": {
-                channel: len(conns) 
-                for channel, conns in self.active_connections.items()
-            },
-            "queue_size": self.broadcast_queue.qsize(),
-            "running": self.running,
-        }
+        return {"connections": len(self.clients), "messages_sent": self.messages_sent,
+                "dropped": sum(c.dropped for c in self.clients.values()), "max_events_per_second": self.max_eps}
